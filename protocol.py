@@ -133,6 +133,33 @@ def parse_srft_packet(data: bytes) -> tuple[int, int, int, bytes] | None:
     return (pkt_type, seq, ack, payload)
 
 
+# ============== SRFT Special Payloads (File size or MD5 hash) ==============
+# TYPE_SYN_ACK payload
+def pack_srft_synack_payload(file_size: int) -> bytes:
+    # file size should be a 4-byte unsigned int
+    return struct.pack('!I', file_size)
+
+def unpack_srft_synack_payload(payload: bytes) -> int | None:
+    # Expecting 4 bytes for file size
+    if len(payload) != 4:
+        return None
+    file_size, = struct.unpack('!I', payload)
+    return file_size
+
+# TYPE_FIN payload
+def pack_srft_fin_payload(md5_hash: bytes) -> bytes:
+    # MD5 hash should be a 16-byte string
+    if len(md5_hash) != 16:
+        raise ValueError("MD5 hash must be 16 bytes, right now it's: " + str(len(md5_hash)))
+    return md5_hash
+
+def unpack_srft_fin_payload(payload: bytes) -> bytes | None:
+    # Expecting 16 bytes for MD5 hash
+    if len(payload) != 16:
+        return None
+    return payload  # 16 bytes md5
+
+
 # ============== Raw Packet Assembly ==============
 def build_raw_packet(
     src_ip: str,
