@@ -135,10 +135,16 @@ def parse_srft_packet(data: bytes) -> tuple[int, int, int, bytes] | None:
 
 # ============== SRFT Special Payloads (File size or MD5 hash) ==============
 # TYPE_SYN_ACK payload
+# How server send srft synack packet:
+# synack_payload = pack_srft_synack_payload(file_size)
+# srft_packet = build_srft_packet(TYPE_SYN_ACK, seq=0, ack=0, payload=synack_payload)
 def pack_srft_synack_payload(file_size: int) -> bytes:
     # file size should be a 4-byte unsigned int
     return struct.pack('!I', file_size)
 
+# Client receives srft synack packet and parse the file size:
+# type, seq, ack, synack_payload = parse_srft_packet(received_data)
+# file_size = unpack_srft_synack_payload(synack_payload)    
 def unpack_srft_synack_payload(payload: bytes) -> int | None:
     # Expecting 4 bytes for file size
     if len(payload) != 4:
