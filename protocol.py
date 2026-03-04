@@ -12,6 +12,8 @@ TYPE_REQUEST = 0x01   # Client requests file (filename in payload)
 TYPE_DATA = 0x02      # Server sends file chunk
 TYPE_ACK = 0x03       # Client acknowledges received packets (cumulative)
 
+TYPE_SYN_ACK  = 0x04  # Server tells Client the size of the file after client requests with filename (file size in payload)
+TYPE_FIN      = 0x05  # Server signals Client that transfer is complete (md5hash of file in payload)
 
 # Checksum
 def compute_checksum(data: bytes) -> int:
