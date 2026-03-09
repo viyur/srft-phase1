@@ -73,7 +73,15 @@ class ReorderBuffer:
                 chunks.append(self._buffer.pop(self._next_expected))
                 self._next_expected += 1
             return chunks
-
+# Determine the correct local IP address used to reach the server,
+# required when constructing raw IP packets manually.
+def resolve_local_ip(to_ip: str) -> str:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((to_ip, 1))
+            return s.getsockname()[0]
+        finally:
+            s.close()
 
 class Receiver:
     def __init__(
@@ -89,7 +97,8 @@ class Receiver:
         self._client_port = client_port
         self._output_dir = output_dir
         self._raw_mode = raw_mode
-        self._sock: socket.socket | None = None
+        self._recv_sock: socket.socket | None = None
+        self._send_sock: socket.socket | None = None
         self._client_ip: str = ""
 
         self._file_size: int = 0
@@ -107,18 +116,31 @@ class Receiver:
     # Public API                                                           #
     # ------------------------------------------------------------------ #
 
+
     def receive(self, filename: str) -> bool:
         self._filename = filename
         self._output_path = os.path.join(self._output_dir, filename)
 
+        # for raw mode, we need to create separate send and receive sockets
         if self._raw_mode:
-            self._sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
-            self._client_ip = socket.gethostbyname(socket.gethostname())
-        else:
-            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._sock.bind(("0.0.0.0", self._client_port))
-            self._client_ip = "127.0.0.1"
+            # Receive socket (captures UDP packets)
+            self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
 
+            # Send socket (we provide our own IP header)
+            self._send_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+            self._send_sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+
+            # Determine the correct local IP address used to reach the server
+            self._client_ip = resolve_local_ip(self._server_ip)
+
+        # for mock mode, we can use a single UDP socket for both sending and receiving
+        else:
+            self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._recv_sock.bind(("0.0.0.0", self._client_port))
+
+            # send socket same as receive socket in mock mode
+            self._send_sock = self._recv_sock
+            self._client_ip = "127.0.0.1"
         try:
             self._send_request(filename)
             if not self._wait_for_synack():
@@ -135,9 +157,18 @@ class Receiver:
             print(f"[DEBUG] _receive_data returned: {success}")
             self.stats.end_time = time.time()
             return success
-
+        # catch any unexpected exceptions to ensure sockets are closed properly
         finally:
-            self._sock.close()
+            # Cleanup sockets used during the transfer
+            # Close the receive socket if it exists
+            # In mock mode, this is the only socket used for both sending and receiving
+            if self._recv_sock:
+                self._recv_sock.close()
+            # Close the send socket only if it is a different socket
+            # (In raw mode we use separate send/receive sockets)
+            # Avoid closing the same socket twice in mock mode
+            if self._send_sock and self._send_sock is not self._recv_sock:
+                self._send_sock.close()
 
     # ------------------------------------------------------------------ #
     # Send REQUEST                                                         #
@@ -156,9 +187,9 @@ class Receiver:
                 self._client_port, self._server_port,
                 srft_pkt,
             )
-            self._sock.sendto(raw, (self._server_ip, self._server_port))
+            self._send_sock.sendto(raw, (self._server_ip, 0))
         else:
-            self._sock.sendto(srft_pkt, (self._server_ip, self._server_port))
+            self._send_sock.sendto(srft_pkt, (self._server_ip, self._server_port))
         print(f"[REQUEST] Sent request for '{filename}'")
 
     # ------------------------------------------------------------------ #
@@ -166,7 +197,7 @@ class Receiver:
     # ------------------------------------------------------------------ #
 
     def _wait_for_synack(self, timeout: float = 5.0) -> bool:
-        self._sock.settimeout(timeout)
+        self._recv_sock.settimeout(timeout)
         for attempt in range(3):
             try:
                 while True:
@@ -184,7 +215,10 @@ class Receiver:
                         print(f"[SYN_ACK] File size: {file_size} bytes, "
                               f"total chunks: {self._total_chunks}")
                         return True
-            except TimeoutError:
+            except socket.timeout:
+                # Timeout while waiting for SYN_ACK from the server.
+                # This may happen due to packet loss or delay, so resend the REQUEST
+                # and retry up to the allowed number of attempts.
                 print(f"[WARN] SYN_ACK timeout, retrying... ({attempt + 1}/3)")
                 self._send_request(self._filename)
         return False
@@ -225,10 +259,11 @@ class Receiver:
                 self._client_port, self._server_port,
                 srft_pkt,
             )
-            self._sock.sendto(raw, (self._server_ip, self._server_port))
+            self._send_sock.sendto(raw, (self._server_ip, 0))
         else:
-            self._sock.sendto(srft_pkt, (self._server_ip, self._server_port))
+            self._send_sock.sendto(srft_pkt, (self._server_ip, self._server_port))
         print(f"[ACK] Sent cumulative ACK: next_expected={ack_num}")
+
 
     # ------------------------------------------------------------------ #
     # Packet receive helper                                                #
@@ -236,7 +271,7 @@ class Receiver:
 
     def _recv_srft_packet(self):
         print("[DEBUG] About to call recvfrom...")
-        raw_data, addr = self._sock.recvfrom(RECV_BUFFER_SIZE)
+        raw_data, addr = self._recv_sock.recvfrom(RECV_BUFFER_SIZE)
         print(f"[DEBUG] recvfrom returned, addr={addr}")
 
         if self._raw_mode:
@@ -266,7 +301,10 @@ class Receiver:
 
     def _receive_data(self) -> bool:
         print("[DEBUG] _receive_data: ENTERED FUNCTION")
-        self._sock.settimeout(5.0)
+
+        # only receive operations need timeout behavior to prevent hanging indefinitely
+        # send socket does not need receive timeout behavior
+        self._recv_sock.settimeout(5.0)
         print("[DEBUG] _receive_data: timeout set")
         md5_from_server: bytes | None = None
 
@@ -301,6 +339,8 @@ class Receiver:
 
         self._transfer_done.set()
         self._send_ack(self._buffer.next_expected)
+        # records the transfer finish a bit closer to the actual receive completion, rather than waiting for MD5 verification which can take time for large files
+        self.stats.end_time = time.time()
         return self._verify_md5(md5_from_server)
 
     def _handle_data(self, seq: int, data: bytes, f):
