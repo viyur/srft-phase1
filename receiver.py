@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import socket
+import struct  # Phase 1: parse file_size from first DATA payload (struct.unpack)
 import threading
 import time
 
@@ -24,6 +25,7 @@ from config import (
     RECV_BUFFER_SIZE,
     DEFAULT_CLIENT_PORT,
     DEFAULT_SERVER_PORT,
+    TIMEOUT_SEC,  # Phase 1: recv timeout for reliable transfer
 )
 
 
@@ -91,7 +93,9 @@ class Receiver:
         client_port: int = DEFAULT_CLIENT_PORT,
         server_port: int = DEFAULT_SERVER_PORT,
         raw_mode: bool = True,
+        phase1: bool = False,  # Phase 1: use REQUEST->DATA->ACK flow (no SYN_ACK/FIN)
     ):
+        self._phase1 = phase1
         self._server_ip = server_ip
         self._server_port = server_port
         self._client_port = client_port
@@ -121,6 +125,20 @@ class Receiver:
         self._filename = filename
         self._output_path = os.path.join(self._output_dir, filename)
 
+        # Phase 1 Support: switch between Phase 1 (no SYN_ACK/FIN) and Phase 2 (SYN_ACK/FIN)
+        if self._phase1:
+            return self._receive_phase1(filename)
+        else:
+            return self._receive_phase2(filename)
+
+    # ------------------------------------------------------------------ #
+    # Phase 1 Support: _receive_phase2 (original flow) + _receive_phase1  #
+    # Phase 1: first DATA = file_size(4B)+chunk0, seq from 1, cumulative  #
+    # ACK, no SYN_ACK/FIN. Phase 2: SYN_ACK/FIN with MD5 verification.   #
+    # ------------------------------------------------------------------ #
+
+    def _receive_phase2(self, filename: str) -> bool:
+        """Phase 2: SYN_ACK/FIN flow"""
         # for raw mode, we need to create separate send and receive sockets
         if self._raw_mode:
             # Receive socket (captures UDP packets)
@@ -132,6 +150,8 @@ class Receiver:
 
             # Determine the correct local IP address used to reach the server
             self._client_ip = resolve_local_ip(self._server_ip)
+            # macOS workaround: connect() + send() instead of sendto() for raw socket
+            self._send_sock.connect((self._server_ip, self._server_port))
 
         # for mock mode, we can use a single UDP socket for both sending and receiving
         else:
@@ -170,6 +190,135 @@ class Receiver:
             if self._send_sock and self._send_sock is not self._recv_sock:
                 self._send_sock.close()
 
+    def _receive_phase1(self, filename: str) -> bool:
+        """Phase 1: REQUEST->DATA->ACK flow. No SYN_ACK/FIN. First DATA payload =
+        file_size(4B big-endian) + chunk0. Cumulative ACK on new highest consecutive seq."""
+        if self._raw_mode:
+            self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+            self._recv_sock.bind(("0.0.0.0", self._client_port))
+            self._send_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+            self._send_sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            self._client_ip = resolve_local_ip(self._server_ip)
+            # macOS workaround: connect() + send() instead of sendto() for raw socket
+            self._send_sock.connect((self._server_ip, self._server_port))
+        else:
+            self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._recv_sock.bind(("0.0.0.0", self._client_port))
+            self._send_sock = self._recv_sock
+            self._client_ip = "127.0.0.1"
+
+        try:
+            self.stats.start_time = time.time()
+            self._send_request(filename)
+
+            received: dict[int, bytes] = {}
+            base_seq = 1
+            last_ack_sent = 0
+            total_chunks = 0
+            file_size = 0
+            done = False
+            ack_lock = threading.Lock()
+            last_request_time = [time.time()]  # use list for nonlocal mutability
+
+            def recv_loop():
+                nonlocal done, total_chunks, file_size
+                self._recv_sock.settimeout(TIMEOUT_SEC)
+                deadline = time.time() + 300
+                while not done and time.time() < deadline:
+                    try:
+                        result = self._recv_srft_packet()
+                    except (TimeoutError, socket.timeout):
+                        # No data yet: retransmit REQUEST every 2s (server may not be running)
+                        with ack_lock:
+                            if len(received) == 0 and time.time() - last_request_time[0] > 2.0:
+                                self._send_request(filename)
+                                last_request_time[0] = time.time()
+                                print("[RETRY] Resent REQUEST (is mock server running?)")
+                        continue
+                    if result is None:
+                        continue
+                    pkt_type, seq, ack, payload = result
+                    if pkt_type != TYPE_DATA:
+                        continue
+                    with ack_lock:
+                        if seq not in received:
+                            received[seq] = payload
+                            self.stats.packets_received += 1
+                            if seq == base_seq and len(payload) >= 4:
+                                file_size, = struct.unpack("!I", payload[:4])
+                                total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+                                total_chunks = max(1, total_chunks)
+                        else:
+                            self.stats.duplicate_packets += 1
+                        sorted_seqs = sorted([s for s in received if s >= base_seq])
+                        highest_consec = base_seq - 1
+                        for s in sorted_seqs:
+                            if s == highest_consec + 1:
+                                highest_consec = s
+                            else:
+                                break
+                        if highest_consec > last_ack_sent:
+                            last_ack_sent = highest_consec
+                            ack_pkt = build_srft_packet(TYPE_ACK, 0, highest_consec, b"")
+                            if self._raw_mode:
+                                raw = build_raw_packet(
+                                    self._client_ip, self._server_ip,
+                                    self._client_port, self._server_port, ack_pkt
+                                )
+                                self._send_sock.send(raw)
+                            else:
+                                self._send_sock.sendto(ack_pkt, (self._server_ip, self._server_port))
+
+            recv_thread = threading.Thread(target=recv_loop, daemon=True)
+            recv_thread.start()
+            start_time = time.time()
+
+            while time.time() - start_time < 300:
+                time.sleep(TIMEOUT_SEC)
+                with ack_lock:
+                    if total_chunks > 0:
+                        sorted_seqs = sorted([s for s in received if s >= base_seq])
+                        highest = base_seq - 1
+                        for s in sorted_seqs:
+                            if s == highest + 1:
+                                highest = s
+                            else:
+                                break
+                        if highest >= base_seq + total_chunks - 1:
+                            break
+                time.sleep(0.1)
+
+            done = True
+            recv_thread.join(timeout=2)
+
+            sorted_seqs = sorted([s for s in received if s >= base_seq])
+            chunks_list = []
+            expected = base_seq
+            for s in sorted_seqs:
+                if s == expected:
+                    if expected == base_seq and len(received[s]) >= 4:
+                        chunks_list.append(received[s][4:])
+                    else:
+                        chunks_list.append(received[s])
+                    expected += 1
+                elif s > expected:
+                    break
+
+            file_data = b"".join(chunks_list)
+            if file_size > 0:
+                file_data = file_data[:file_size]
+
+            os.makedirs(os.path.dirname(self._output_path) or ".", exist_ok=True)
+            with open(self._output_path, "wb") as f:
+                f.write(file_data)
+
+            self.stats.end_time = time.time()
+            return len(file_data) > 0
+        finally:
+            if self._recv_sock:
+                self._recv_sock.close()
+            if self._send_sock and self._send_sock is not self._recv_sock:
+                self._send_sock.close()
     # ------------------------------------------------------------------ #
     # Send REQUEST                                                         #
     # ------------------------------------------------------------------ #
@@ -187,7 +336,7 @@ class Receiver:
                 self._client_port, self._server_port,
                 srft_pkt,
             )
-            self._send_sock.sendto(raw, (self._server_ip, 0))
+            self._send_sock.send(raw)
         else:
             self._send_sock.sendto(srft_pkt, (self._server_ip, self._server_port))
         print(f"[REQUEST] Sent request for '{filename}'")
@@ -259,7 +408,7 @@ class Receiver:
                 self._client_port, self._server_port,
                 srft_pkt,
             )
-            self._send_sock.sendto(raw, (self._server_ip, 0))
+            self._send_sock.send(raw)
         else:
             self._send_sock.sendto(srft_pkt, (self._server_ip, self._server_port))
         print(f"[ACK] Sent cumulative ACK: next_expected={ack_num}")
@@ -270,9 +419,7 @@ class Receiver:
     # ------------------------------------------------------------------ #
 
     def _recv_srft_packet(self):
-        print("[DEBUG] About to call recvfrom...")
         raw_data, addr = self._recv_sock.recvfrom(RECV_BUFFER_SIZE)
-        print(f"[DEBUG] recvfrom returned, addr={addr}")
 
         if self._raw_mode:
             parsed = parse_raw_packet(raw_data)
@@ -282,7 +429,6 @@ class Receiver:
         else:
             src_ip, src_port = addr
             udp_payload = raw_data
-            print(f"[DEBUG] Received packet from {src_ip}:{src_port}, expected {self._server_ip}:{self._server_port}")
 
         if src_ip != self._server_ip or src_port != self._server_port:
             print(f"[DEBUG] Filtered out packet from {src_ip}:{src_port}")

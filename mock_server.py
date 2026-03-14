@@ -5,6 +5,10 @@ Does NOT use SOCK_RAW - uses regular UDP socket for simplicity.
 Implements simple sliding window flow control to match receiver's window.
 
 Usage:
+    # Phase 1 (no SYN_ACK/FIN, for macOS/local testing without sudo):
+    python3 mock_server.py --scenario normal --file files/test.txt --phase1
+
+    # Phase 2:
     python3 mock_server.py --scenario normal --file files/test_10mb_file
     python3 mock_server.py --scenario loss --file files/test_10mb_file --loss 0.03
     python3 mock_server.py --scenario reorder --file files/test_10mb_file
@@ -18,6 +22,7 @@ import math
 import os
 import random
 import socket
+import struct
 import time
 import threading
 
@@ -203,10 +208,86 @@ class SlidingWindowSender:
 # Mock Server                                                          #
 # ------------------------------------------------------------------ #
 
+class Phase1Sender:
+    """Phase 1: REQUEST->DATA->ACK, no SYN_ACK/FIN. First DATA = file_size(4B)+chunk0, seq from 1."""
+
+    def __init__(self, sock: socket.socket, client_addr: tuple, file_bytes: bytes):
+        self.sock = sock
+        self.client_addr = client_addr
+        self.file_size = len(file_bytes)
+        self.chunks = [
+            file_bytes[i * CHUNK_SIZE:(i + 1) * CHUNK_SIZE]
+            for i in range(math.ceil(len(file_bytes) / CHUNK_SIZE))
+        ]
+        self.total_chunks = max(1, len(self.chunks))
+        self.base_seq = 1
+        self.last_ack = 0
+        self.ack_lock = threading.Lock()
+        self.sent_time: dict[int, float] = {}
+        self.packets_sent = 0
+        self.retransmissions = 0
+
+    def run(self):
+        sock = self.sock
+        client = self.client_addr
+        sock.settimeout(TIMEOUT_SEC)
+        deadline = time.time() + 300
+
+        # Send all DATA packets initially
+        first_payload = struct.pack("!I", self.file_size) + self.chunks[0]
+        pkt = build_srft_packet(TYPE_DATA, self.base_seq, 0, first_payload)
+        sock.sendto(pkt, client)
+        self.packets_sent += 1
+        self.sent_time[self.base_seq] = time.time()
+
+        for i in range(1, self.total_chunks):
+            pkt = build_srft_packet(TYPE_DATA, self.base_seq + i, 0, self.chunks[i])
+            sock.sendto(pkt, client)
+            self.packets_sent += 1
+            self.sent_time[self.base_seq + i] = time.time()
+
+        while self.last_ack < self.total_chunks and time.time() < deadline:
+            try:
+                data, addr = sock.recvfrom(65535)
+                if addr[0] != client[0] or addr[1] != client[1]:
+                    continue
+                result = parse_srft_packet(data)
+                if result is None:
+                    continue
+                pkt_type, seq, ack, _ = result
+                if pkt_type != TYPE_ACK:
+                    continue
+                with self.ack_lock:
+                    # ack = highest consecutive seq received (e.g. ack=3 means received 1,2,3)
+                    if ack >= self.base_seq:
+                        num_acked = ack - self.base_seq + 1
+                        if num_acked > self.last_ack:
+                            self.last_ack = num_acked
+                            for s in range(self.base_seq, ack + 1):
+                                self.sent_time.pop(s, None)
+            except (TimeoutError, socket.timeout, BlockingIOError):
+                # Retransmit unacked
+                for i in range(self.last_ack, self.total_chunks):
+                    seq = self.base_seq + i
+                    if seq == self.base_seq:
+                        payload = struct.pack("!I", self.file_size) + self.chunks[0]
+                    else:
+                        payload = self.chunks[i]
+                    pkt = build_srft_packet(TYPE_DATA, seq, 0, payload)
+                    sock.sendto(pkt, client)
+                    self.retransmissions += 1
+                    self.sent_time[seq] = time.time()
+            time.sleep(0.001)
+
+        print(f"[PHASE1 SENDER] Done. last_ack={self.last_ack}/{self.total_chunks}, "
+              f"sent={self.packets_sent}, retrans={self.retransmissions}")
+
+
 class MockServer:
-    def __init__(self, scenario: str, filename: str, loss_rate: float = 0.0):
+    def __init__(self, scenario: str, filename: str, loss_rate: float = 0.0, phase1: bool = False):
         self.scenario = scenario
         self.loss_rate = loss_rate
+        self.phase1 = phase1
 
         if not os.path.exists(filename):
             raise FileNotFoundError(f"Test file '{filename}' not found.")
@@ -223,8 +304,9 @@ class MockServer:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", DEFAULT_SERVER_PORT))
+        mode = "Phase 1" if phase1 else "Phase 2"
         print(f"[MOCK SERVER] Listening on port {DEFAULT_SERVER_PORT}, "
-              f"scenario='{scenario}', file='{filename}', loss={loss_rate*100:.0f}%")
+              f"scenario='{scenario}', file='{filename}', mode={mode}, loss={loss_rate*100:.0f}%")
         print(f"[MOCK SERVER] {len(self.test_file_bytes):,} bytes, "
               f"{self.total_chunks} chunks, MD5={self.test_file_md5.hex()}")
 
@@ -241,13 +323,20 @@ class MockServer:
             return
         print(f"[MOCK SERVER] REQUEST for '{payload.decode()}' from {client_addr}")
 
-        # Step 2: Send SYN_ACK
+        if self.phase1:
+            # Phase 1: no SYN_ACK/FIN, first DATA = file_size(4B)+chunk0, seq from 1
+            sender = Phase1Sender(self.sock, client_addr, self.test_file_bytes)
+            sender.run()
+            print("[MOCK SERVER] Phase 1 transfer done.")
+            return
+
+        # Step 2: Send SYN_ACK (Phase 2 only)
         synack_payload = pack_srft_synack_payload(len(self.test_file_bytes))
         send_srft(self.sock, client_addr, TYPE_SYN_ACK, 0, 0, synack_payload)
         print(f"[MOCK SERVER] Sent SYN_ACK")
         time.sleep(0.1)
 
-        # Step 3: Send DATA with sliding window
+        # Step 3: Send DATA with sliding window (Phase 2)
         sender = SlidingWindowSender(
             sock=self.sock,
             client_addr=client_addr,
@@ -307,7 +396,12 @@ if __name__ == "__main__":
         default=0.0,
         help="Packet loss rate (0.0 to 1.0), e.g. 0.03 for 3%%",
     )
+    parser.add_argument(
+        "--phase1",
+        action="store_true",
+        help="Phase 1 mode: no SYN_ACK/FIN, first DATA = file_size(4B)+chunk0",
+    )
     args = parser.parse_args()
 
-    server = MockServer(args.scenario, args.file, args.loss)
+    server = MockServer(args.scenario, args.file, args.loss, phase1=args.phase1)
     server.run()

@@ -51,6 +51,12 @@ def parse_args():
         action="store_true",
         help="Use plain UDP socket for mock server testing (no sudo needed)",
     )
+    # Phase 1 Support: enable REQUEST->DATA->ACK flow (no SYN_ACK/FIN)
+    parser.add_argument(
+        "--phase1",
+        action="store_true",
+        help="Phase 1 mode: reliable transfer without SYN_ACK/FIN",
+    )
     return parser.parse_args()
 
 
@@ -74,14 +80,19 @@ def main():
     print(f"  File       : {args.file}")
     print(f"  Output dir : {args.output_dir}")
     print(f"  Mode       : {'RAW (production)' if raw_mode else 'UDP (mock test)'}")
+    if args.mock and args.phase1:
+        print("  [Phase 1]  Ensure mock server is running first:")
+        print("            python3 mock_server.py --scenario normal --file files/test.txt --phase1")
     print("=" * 50)
 
+    # Phase 1 Support: pass phase1 flag to Receiver for protocol selection
     receiver = Receiver(
         server_ip=args.server,
         output_dir=args.output_dir,
         client_port=args.client_port,
         server_port=args.server_port,
         raw_mode=raw_mode,
+        phase1=args.phase1,
     )
 
     success = receiver.receive(args.file)
