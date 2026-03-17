@@ -10,7 +10,7 @@ FILES_DIR = "files"
 REPORT_FILE = "transfer_report.txt"
 
 SLIDING_WINDOW_SIZE = 64   # 小于包数，可以测试window滑动
-ACK_EVERY_N = 1     # 每包都ACK，调试方便
-ACK_INTERVAL_SEC = 0.2
+ACK_EVERY_N = 5     # client每收到5个包，就给server发一个ACK
+ACK_INTERVAL_SEC = 0.02
 RECV_BUFFER_SIZE = 65535
 
