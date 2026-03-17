@@ -41,7 +41,7 @@ Client                              Server
   |                                   |
   |------- TYPE_REQUEST ------------->|  payload = 文件名（如 "test_800mb_file"）
   |                                   |
-  |<------ TYPE_SYN_ACK -------------|  payload = 文件总大小（4字节，网络字节序）
+  |<------ TYPE_SYN_ACK -------------|  payload = 文件总大小（4字节，网络字节序）server告诉client文件大小
   |                                   |  seq=0, ack=0（控制包，不参与滑动窗口）
   |                                   |
   |<------ TYPE_DATA (seq=0) ---------|
@@ -49,9 +49,9 @@ Client                              Server
   |<------ TYPE_DATA (seq=2) ---------|  ← Go-Back-N 窗口内连续发送
   |<------ TYPE_DATA (seq=3) ---------|
   |<------ TYPE_DATA (seq=4) ---------|
-  |------- TYPE_ACK (ack=5) --------->|  ← 每收到 5 包发一次累积 ACK
+  |------- TYPE_ACK (ack=5) --------->|  ← client每收到 5 包发一次累积 ACK
   |          ...                      |
-  |<------ TYPE_FIN ------------------|  payload = MD5 digest（16字节）
+  |<------ TYPE_FIN ------------------|  payload = MD5 digest（16字节）Server在FIN里发送文件MD5
   |------- TYPE_ACK ----------------->|  最终确认
 ```
 
@@ -81,9 +81,9 @@ IP 头部和 UDP 头部也分别计算了各自的标准 checksum，符合 RFC 7
 - 收到的包 `seq == expected_seq`：写入文件，`expected_seq += 1`，正常处理
 - 收到的包 `seq != expected_seq`（重复包或乱序包）：**直接丢弃**，并立即重新发送当前的累积 ACK
 
-这是 **Go-Back-N** 的标准接收端行为——客户端不缓存乱序包，服务端一旦超时就退回重传整个窗口。
+这是 **Go-Back-N** 的标准接收端行为——客户端通过丢弃乱序或重复包，让服务端无法收到ACK，一旦超时就退回重传整个窗口，这样来确保包的顺序不会混乱。
 
-> `TYPE_SYN_ACK` 和 `TYPE_FIN` 等控制包的 seq 固定为 0，不参与滑动窗口计数。
+> `TYPE_SYN_ACK` 和 `TYPE_FIN` 等控制包的 seq 固定为 0，不参与滑动窗口计数而 `ACK` 指的的next expected seq，下一个期望收到的序列号，如果`UDPClient`发的 `ACK`是16，则说明`UDPClient`已经收到了序号为0到15的所有数据包。
 
 ---
 
@@ -136,7 +136,8 @@ sudo python3.11 UDPServer.py
 
 **客户端：**
 ```bash
-sudo python3.11 UDPClient.py --server-ip 34.229.212.42 --filename test_800mb_file
+sudo python3.11 UDPClient.py --server-ip <EC2_SERVER_IP> --filename test_800mb_file
+
 ```
 
 > 使用默认参数时，服务端监听 `0.0.0.0:5000`，文件目录为 `files/`。  
@@ -197,25 +198,7 @@ sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename test_800mb_f
 
 ---
 
-## 在 Linux 虚拟机上运行（单机双终端，Mock 模式）
 
-在本地虚拟机测试时，使用 `--mock` 模式绕过 raw socket，无需 `sudo`：
-
-**Terminal 1 — 启动服务端：**
-```bash
-cd ~/srft-phase1
-python3.11 UDPServer.py --bind-ip 127.0.0.1 --port 5000 --dir files --mock
-```
-
-**Terminal 2 — 启动客户端：**
-```bash
-cd ~/srft-phase1
-python3.11 UDPClient.py --server-ip 127.0.0.1 --filename test_10mb_file --mock
-```
-
-> Mock 模式仅用于本地调试，不会真正构造 IP/UDP 头部，无法测试 raw socket 行为。
-
----
 
 ## EC2 丢包模拟配置（`tc` 命令）
 
@@ -223,19 +206,19 @@ python3.11 UDPClient.py --server-ip 127.0.0.1 --filename test_10mb_file --mock
 
 ```bash
 # 查看当前 tc 规则
-tc qdisc show dev eth0
+tc qdisc show dev ens5
 
 # 添加 3% 随机丢包（当前配置）
-sudo tc qdisc add dev eth0 root netem loss 3%
+sudo tc qdisc add dev ens5 root netem loss 3%
 
 # 修改丢包率
-sudo tc qdisc change dev eth0 root netem loss 5%
+sudo tc qdisc change dev ens5 root netem loss 5%
 
 # 删除丢包配置（恢复正常网络）
-sudo tc qdisc del dev eth0 root
+sudo tc qdisc del dev ens5 root
 ```
 
-删除后可用 `tc qdisc show dev eth0` 确认规则已清空，之后重新运行客户端即可在无丢包环境下测试。
+删除后可用 `tc qdisc show dev ens5` 确认规则已清空，之后重新运行客户端即可在无丢包环境下测试。
 
 ---
 
