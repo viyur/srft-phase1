@@ -1,10 +1,10 @@
 # UDPServer.py
 # Example command to run the server in mock mode (for local testing, no sudo required)
-# python3 UDPServer.py --bind-ip 127.0.0.1 --port 9000 --dir files --mock
+# python3 UDPServer.py --bind-ip 127.0.0.1 --port 5000 --dir files --mock
 
 # Example command to run the server in raw mode (real testing, requires sudo)
 # Replace <server_ip> with the server machine's actual IP address
-# sudo python3 UDPServer.py --bind-ip <server_ip> --port 9000 --dir files
+# sudo python3 UDPServer.py --bind-ip <server_ip> --port 5000 --dir files
 
 from protocol import (
     TYPE_REQUEST,
