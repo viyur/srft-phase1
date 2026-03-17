@@ -1,85 +1,296 @@
+# SRFT — 简单可靠文件传输协议（Phase 1）
 
-
-## 🏗 Client 相关的
-
-项目采用了分层设计，将底层网络交互与上层重组逻辑分离：
-
-* **`receiver.py` (逻辑层/Logic Layer)**: 核心业务逻辑。负责维护接收窗口、处理数据包重组、检测缺失分片（Loss Detection）以及计算最终文件的校验和。
-* **`UDPClient.py` (接口层/Interface Layer)**: 程序的入口。负责解析命令行参数、初始化网络连接，并将底层的 UDP 数据包传递给 `receiver.py` 处理。
-* **`mock_server.py` (模拟服务端)**: 用于压力测试和异常模拟。它可以模拟真实网络中的各种恶劣情况（丢包、乱序等），验证客户端的健壮性。
+基于原始 UDP socket 构建的应用层可靠文件传输协议，手动构造 IP 与 UDP 头部，并实现了 **Go-Back-N 滑动窗口**机制以在不可靠网络上保障可靠传输。
 
 ---
 
-## 🚀 快速开始 (Mock 模式)
+## 协议设计详解
 
-目前项目主要在 **Mock 模式**下进行开发和测试。该模式不需要 `sudo` 权限，适合在本地快速迭代。
+### 数据包结构
 
-### 1. 准备测试文件
-
-如果你不想使用大文件，可以使用内置脚本生成一个结构化的测试文件（5 个 Chunk 大小，包含调试模式）：
-
-```bash
-python3 files/gen_test_file.py
+每个发送的数据包从底层到应用层依次封装如下：
 
 ```
+[ IP Header (20 bytes) ] [ UDP Header (8 bytes) ] [ SRFT Header (11 bytes) ] [ Payload ]
+```
 
-* **输出**: 生成名为 `random.bin` 的文件。
+SRFT Header 格式（共 11 字节）：
 
-### 2. 启动模拟服务端 (Mock Server)
-
-你可以根据需要选择不同的网络场景进行测试：
-
-| 场景 (Scenario) | 说明 | 运行命令 |
-| --- | --- | --- |
-| **正常** | 无干扰传输 | `python3 mock_server.py --scenario normal --file files/random.bin` |
-| **丢包** | 模拟 3% 丢包 | `python3 mock_server.py --scenario loss --file files/random.bin --loss 0.03` |
-| **乱序** | 模拟包到达顺序错乱 | `python3 mock_server.py --scenario reorder --file files/random.bin` |
-| **重复** | 模拟收到重复包 | `python3 mock_server.py --scenario duplicate --file files/random.bin` |
-| **损坏** | 模拟位翻转/数据损坏 | `python3 mock_server.py --scenario corrupt --file files/random.bin` |
-
-### 3. 运行客户端 (UDPClient)
-
-在另一个终端运行客户端来接收文件：
-如果成功连接到模拟服务器并正确处理数据包，客户端会讲收集到的分片进行重组，并在 `received` 文件夹中生成最终文件。
-
-```bash
-# 使用 --mock 参数连接本地模拟服务器
-python3 UDPClient.py --server 127.0.0.1 --file random.bin --output-dir received --mock
-
+```
+[ pkt_type (1B) | seq (4B) | ack (4B) | checksum (2B) ]
 ```
 
 ---
 
-## 🛠 真实模式 (Real Mode)
+### 五种包类型
 
-当切换到真实物理环境（非本地模拟）时，由于使用了原始套接字 (`SOCK_RAW (Raw Socket)`)，需要管理员权限：
+| 类型 | 值 | 方向 | 说明 |
+|---|---|---|---|
+| `TYPE_REQUEST` | `0x01` | Client → Server | 客户端请求文件，payload 为文件名 |
+| `TYPE_SYN_ACK` | `0x04` | Server → Client | 服务端确认请求，payload 包含文件总大小（4字节） |
+| `TYPE_DATA` | `0x02` | Server → Client | 服务端发送文件块，payload 为数据内容 |
+| `TYPE_ACK` | `0x03` | Client → Server | 客户端发送累积确认号 |
+| `TYPE_FIN` | `0x05` | Server → Client | 服务端通知传输完成，payload 为文件 MD5（16字节） |
 
-```bash
-sudo python3 UDPClient.py --server [SERVER_IP] --file [FILENAME] --output-dir received
+---
 
+### 完整传输流程
+
+```
+Client                              Server
+  |                                   |
+  |------- TYPE_REQUEST ------------->|  payload = 文件名（如 "test_800mb_file"）
+  |                                   |
+  |<------ TYPE_SYN_ACK -------------|  payload = 文件总大小（4字节，网络字节序）
+  |                                   |  seq=0, ack=0（控制包，不参与滑动窗口）
+  |                                   |
+  |<------ TYPE_DATA (seq=0) ---------|
+  |<------ TYPE_DATA (seq=1) ---------|
+  |<------ TYPE_DATA (seq=2) ---------|  ← Go-Back-N 窗口内连续发送
+  |<------ TYPE_DATA (seq=3) ---------|
+  |<------ TYPE_DATA (seq=4) ---------|
+  |------- TYPE_ACK (ack=5) --------->|  ← 每收到 5 包发一次累积 ACK
+  |          ...                      |
+  |<------ TYPE_FIN ------------------|  payload = MD5 digest（16字节）
+  |------- TYPE_ACK ----------------->|  最终确认
 ```
 
 ---
 
-## ✅ 结果验证
+### 关键机制说明
 
-传输完成后，系统会自动执行以下验证步骤：
+#### 1. Checksum 校验（数据完整性）
 
-1. **MD5 校验**: 客户端会计算接收到的文件分片组合后的 **MD5 Hash**。
-2. **比对**: 将该 Hash 与 Sender 端原始文件的 MD5 进行比对。
-3. **持久化**: 如果 Hash 一致（说明传输无误），文件将被正式写入 `received` 文件夹。
+每个 SRFT 包发送前，对以下内容计算 16 位校验和：
 
----
+```
+checksum_data = SRFT Header（不含 checksum 字段）+ payload
+```
 
-## 📝 调试流程示例 (Using `random.bin`)
+计算方法为**反码求和（one's complement sum）**：将数据按 2 字节分组求和，高位进位回加，最后取反。接收方用同样方法重新计算并与包中存储的值比对，不一致则直接丢弃该包。
 
-如果你使用 `gen_test_file.py` 生成的小文件进行测试，标准流程如下：
-
-1. **生成文件**: `python3 files/gen_test_file.py`。
-2. **服务端发包**: 运行 `mock_server.py` 并指定 `--scenario loss`（或其他场景）。
-3. **客户端接包**: 运行 `UDPClient.py --mock`。
-4. **查看日志**: 观察 `receiver.py` 是否正确识别了缺失的序列号并触发重传/重组。
-5. **检查结果**: 确认 `received/random.bin` 是否生成，并检查终端输出的 MD5 匹配信息。
+IP 头部和 UDP 头部也分别计算了各自的标准 checksum，符合 RFC 791 和 RFC 768 规范。
 
 ---
 
+#### 2. Sequence Numbers（序列号 — 检测重复与乱序）
+
+服务端发送的每个 `TYPE_DATA` 包都携带一个从 **0** 开始的递增序列号（`seq=0, 1, 2, ...`），每个序列号对应文件的一个固定大小块（默认 1024 字节）。
+
+客户端维护一个 `expected_seq`，初始值为 **0**：
+- 收到的包 `seq == expected_seq`：写入文件，`expected_seq += 1`，正常处理
+- 收到的包 `seq != expected_seq`（重复包或乱序包）：**直接丢弃**，并立即重新发送当前的累积 ACK
+
+这是 **Go-Back-N** 的标准接收端行为——客户端不缓存乱序包，服务端一旦超时就退回重传整个窗口。
+
+> `TYPE_SYN_ACK` 和 `TYPE_FIN` 等控制包的 seq 固定为 0，不参与滑动窗口计数。
+
+---
+
+#### 3. Cumulative ACK（累积确认号 — 避免逐包 ACK）
+
+客户端发送的 `TYPE_ACK` 包中，`ack` 字段的值表示**下一个期望收到的序列号**，即服务端可以认为 `seq < ack` 的所有包均已被正确接收。
+
+为了避免每收到一个包就发一次 ACK（会产生大量小包），客户端采用**延迟 ACK 策略**，满足以下任一条件时才发送 ACK：
+
+| 触发条件 | 配置参数 | 默认值 |
+|---|---|---|
+| 累计收到 N 个包 | `ACK_EVERY_N` | 5 |
+| 距离上次 ACK 超过一定时间 | `ACK_INTERVAL_SEC` | 0.02 秒 |
+| 已收到最后一个数据包 | — | 自动触发 |
+| 收到乱序/重复包 | — | 立即触发（负反馈） |
+
+---
+
+#### 4. Retransmission due to Timeout（超时重传）
+
+服务端使用 Go-Back-N 窗口管理发送缓冲区：
+
+- 每次发送 `base`（最旧未确认包）时，启动一个计时器，超时时间为 `TIMEOUT_SEC`（默认 0.5 秒）
+- 若在超时前收到 ACK，则滑动窗口，为新的 `base` 重启计时器
+- 若超时仍未收到 ACK，则**重传 `[base, next_seq)` 范围内所有未确认包**，并重启计时器
+
+---
+
+## ⚠️ 平台限制 — macOS 不支持
+
+> **macOS 对原始 socket 有严格限制，`IP_HDRINCL` 无法正常工作。**
+>
+> 在 macOS 上手动构造 IP + UDP 头部的数据包无法正确发送和接收，程序会报错或静默失败。
+
+**必须在以下环境测试：**
+- ✅ **Linux EC2 实例**（推荐，见下方测试结果）
+- ✅ **Linux 虚拟机**（VirtualBox、VMware、UTM 等）
+- ❌ macOS — 不支持 raw socket 模式
+
+---
+
+## 快速开始
+
+### 最快方式（使用默认参数）
+
+**服务端：**
+```bash
+sudo python3.11 UDPServer.py
+```
+
+**客户端：**
+```bash
+sudo python3.11 UDPClient.py --server-ip 34.229.212.42 --filename test_800mb_file
+```
+
+> 使用默认参数时，服务端监听 `0.0.0.0:5000`，文件目录为 `files/`。  
+> 如需测试较小的文件，可将 `--filename test_800mb_file` 换成 `--filename test_10mb_file`，传输速度更快，便于调试。
+
+---
+
+### 完整参数说明
+
+**服务端所有可用参数：**
+```bash
+sudo python3.11 UDPServer.py \
+  --bind-ip <SERVER_IP>   # 服务端绑定 IP，默认 0.0.0.0（自动检测）
+  --port 5000             # 监听端口，默认 5000
+  --dir files             # 提供文件的目录，默认 files/
+  --chunk 1024            # 每个 DATA 包的 payload 大小（字节），默认 1024
+  --timeout 0.5           # 重传超时时间（秒），默认 0.5
+  --window 64             # Go-Back-N 窗口大小，默认 64
+  --mock                  # 本地测试模式，不使用 raw socket（无需 sudo）
+```
+
+**客户端所有可用参数：**
+```bash
+sudo python3.11 UDPClient.py \
+  --server-ip <SERVER_IP>   # 服务端 IP 地址（必填）
+  --server-port 5000        # 服务端端口，默认 5000
+  --client-port 5001        # 客户端源端口，默认 5001
+  --filename test_800mb_file  # 要请求的文件名（必填）
+  --out-dir received        # 接收文件保存目录，默认 received/
+```
+
+> **注意：raw socket 模式下必须使用 `sudo python3.11` 运行，否则会因权限不足而报错。**
+
+---
+
+## 在 EC2 上运行（双机模式）
+
+### 前提条件
+- 两台 EC2 Linux 实例，项目文件均位于 `~/srft-phase1/`
+- 安全组开放两台机器之间 UDP 5000、5001 端口
+- 已安装 Python 3.11
+
+### 操作步骤
+
+**Terminal 1 — 登录服务端，启动服务：**
+```bash
+ssh -i srft-keypair.pem ec2-user@<SERVER_EC2_IP>
+cd ~/srft-phase1
+sudo python3.11 UDPServer.py
+```
+
+**Terminal 2 — 登录客户端，发起请求：**
+```bash
+ssh -i srft-keypair.pem ec2-user@<CLIENT_EC2_IP>
+cd ~/srft-phase1
+sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename test_800mb_file
+```
+
+---
+
+## 在 Linux 虚拟机上运行（单机双终端，Mock 模式）
+
+在本地虚拟机测试时，使用 `--mock` 模式绕过 raw socket，无需 `sudo`：
+
+**Terminal 1 — 启动服务端：**
+```bash
+cd ~/srft-phase1
+python3.11 UDPServer.py --bind-ip 127.0.0.1 --port 5000 --dir files --mock
+```
+
+**Terminal 2 — 启动客户端：**
+```bash
+cd ~/srft-phase1
+python3.11 UDPClient.py --server-ip 127.0.0.1 --filename test_10mb_file --mock
+```
+
+> Mock 模式仅用于本地调试，不会真正构造 IP/UDP 头部，无法测试 raw socket 行为。
+
+---
+
+## EC2 丢包模拟配置（`tc` 命令）
+
+客户端 EC2 实例上使用 `tc`（Linux Traffic Control）模拟了 **3% 随机丢包**，用于测试协议在不可靠网络下的重传机制：
+
+```bash
+# 查看当前 tc 规则
+tc qdisc show dev eth0
+
+# 添加 3% 随机丢包（当前配置）
+sudo tc qdisc add dev eth0 root netem loss 3%
+
+# 修改丢包率
+sudo tc qdisc change dev eth0 root netem loss 5%
+
+# 删除丢包配置（恢复正常网络）
+sudo tc qdisc del dev eth0 root
+```
+
+删除后可用 `tc qdisc show dev eth0` 确认规则已清空，之后重新运行客户端即可在无丢包环境下测试。
+
+---
+
+## EC2 实测结果 — 800 MB 文件传输
+
+以下为两台 EC2 实例之间在 **3% 模拟丢包**条件下传输 800 MB 文件的实测数据：
+
+### 服务端报告
+```
+传输文件名称：        test_800mb_file
+文件大小：            838,860,800 字节（约 800 MB）
+服务端发送包总数：    820,866
+重传包数量：          1,664
+收到客户端 ACK 数：   159,845
+传输总耗时：          00:03:29
+```
+
+### 客户端输出
+```
+[SUCCESS] MD5 verified. Transfer complete.
+[CLIENT] duration: 219 seconds
+[CLIENT] transfer succeeded
+```
+
+### 数据分析
+
+| 指标 | 数值 |
+|---|---|
+| 有效吞吐量 | ~838 MB / 219s ≈ **3.8 MB/s** |
+| 重传率 | 1,664 / 820,866 ≈ **0.2%** |
+| ACK 包数 / 数据包数 | 159,845 / 819,200 ≈ 每 5 包一 ACK，与 `ACK_EVERY_N=5` 一致 |
+| 文件完整性 | MD5 校验通过，无损坏 |
+
+---
+
+## 配置参数（`config.py`）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `DEFAULT_SERVER_PORT` | `5000` | 服务端监听端口 |
+| `DEFAULT_CLIENT_PORT` | `5001` | 客户端源端口 |
+| `CHUNK_SIZE` | `1024` 字节 | 每个 DATA 包的数据大小 |
+| `TIMEOUT_SEC` | `0.5` 秒 | 重传超时时间 |
+| `SLIDING_WINDOW_SIZE` | `64` | Go-Back-N 窗口大小 |
+| `ACK_EVERY_N` | `5` | 每收到 N 包发一次 ACK |
+| `ACK_INTERVAL_SEC` | `0.02` 秒 | ACK 最大发送间隔 |
+| `FILES_DIR` | `files/` | 服务端文件目录 |
+| `REPORT_FILE` | `transfer_report.txt` | 服务端报告保存路径 |
+
+---
+
+## 参考资料
+
+- [RFC 791 — Internet Protocol (IP)](https://www.rfc-editor.org/rfc/rfc791)
+- [RFC 768 — User Datagram Protocol (UDP)](https://www.rfc-editor.org/rfc/rfc768)
+- [Python `hashlib` 文档](https://docs.python.org/3/library/hashlib.html)
+- [Python `struct` 文档](https://docs.python.org/3/library/struct.html)
+- [Linux `tc` / `netem` 文档](https://man7.org/linux/man-pages/man8/tc-netem.8.html)
