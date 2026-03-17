@@ -2,13 +2,25 @@
 Generate a test file that is exactly 5 * CHUNK_SIZE bytes.
 Each chunk is filled with a recognizable pattern for easy debugging.
 
-Run: python3 gen_test_file.py
-Output: random.bin
+If your working directory is SRFT-PHASE1, the parent directory of files directory
+Then you can 
+Run: python3 files/gen_test_file.py
+Output: files/random.bin
 """
-
 import hashlib
+import os
+import sys
+
+current_directory = os.path.dirname(os.path.abspath(__file__))
+parent_directory = os.path.dirname(current_directory)
+if parent_directory not in sys.path:
+    # Put parent directory at the front of sys.path
+    sys.path.insert(0, parent_directory)
+    
 from config import CHUNK_SIZE
 
+# Place file in the same directory as to gen_test_file.py
+FILEPATH = os.path.join(current_directory, "random.bin")
 FILENAME = "random.bin"
 NUM_CHUNKS = 1024 
 
@@ -24,7 +36,7 @@ for i in range(NUM_CHUNKS):
 data = b"".join(chunks)
 assert len(data) == NUM_CHUNKS * CHUNK_SIZE
 
-with open(FILENAME, "wb") as f:
+with open(FILEPATH, "wb") as f:
     f.write(data)
 
 md5 = hashlib.md5(data).hexdigest()
