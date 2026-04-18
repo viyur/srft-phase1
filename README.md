@@ -186,7 +186,7 @@ sudo python3.11 UDPClient.py \
 ```bash
 ssh -i srft-keypair.pem ec2-user@<SERVER_EC2_IP>
 cd ~/srft-phase1
-sudo python3.11 UDPServer.py
+sudo python3.11 UDPServer.py --timeout 0.03 --window 16 （为了配合server丢包，timeout需要减少！！！）
 ```
 
 **Terminal 2 — 登录客户端，发起请求：**
@@ -202,55 +202,54 @@ sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename test_800mb_f
 
 ## EC2 丢包模拟配置（`tc` 命令）
 
-客户端 EC2 实例上使用 `tc`（Linux Traffic Control）模拟了 **3% 随机丢包**，用于测试协议在不可靠网络下的重传机制：
+server 端 EC2 实例上使用 `tc`（Linux Traffic Control）模拟了 **3% 随机丢包**，用于测试协议在不可靠网络下的重传机制：
 
 ```bash
 # 查看当前 tc 规则
 tc qdisc show dev ens5
 
-# 添加 3% 随机丢包（当前配置）
-sudo tc qdisc add dev ens5 root netem loss 3%
-
-# 修改丢包率
-sudo tc qdisc change dev ens5 root netem loss 5%
+# 添加 2%到4% 随机丢包（当前配置）
+sudo tc qdisc add dev ens5 root netem loss 2% 4%
 
 # 删除丢包配置（恢复正常网络）
 sudo tc qdisc del dev ens5 root
 ```
 
-删除后可用 `tc qdisc show dev ens5` 确认规则已清空，之后重新运行客户端即可在无丢包环境下测试。
+删除后可用 `tc qdisc show dev ens5` 确认规则已清空，之后重新运行server side即可在无丢包环境下测试。
 
 ---
 
-## EC2 实测结果 — 800 MB 文件传输
+## EC2 实测结果 —  1GB 文件传输
 
-以下为两台 EC2 实例之间在 **3% 模拟丢包**条件下传输 800 MB 文件的实测数据：
+以下为两台 EC2 实例之间在 **模拟丢包**条件下传输 1GB 文件的实测数据：
 
 ### 服务端报告
 ```
-传输文件名称：        test_800mb_file
-文件大小：            838,860,800 字节（约 800 MB）
-服务端发送包总数：    820,866
-重传包数量：          1,664
-收到客户端 ACK 数：   159,845
-传输总耗时：          00:03:29
+Name of the transferred file: test_1gb_file
+Size of the transferred file: 1073741824
+The number of packets sent from the server: 1131666
+The number of retransmitted packets from the server: 83088
+The number of packets received from the client: 289198
+The time duration of the file transfer (hh:min:ss): 00:05:57
+Report saved to transfer_report.txt
 ```
 
 ### 客户端输出
 ```
+[ACK] sent cumulative ACK=1048576
+[FIN] received from server
 [SUCCESS] MD5 verified. Transfer complete.
-[CLIENT] duration: 219 seconds
+[CLIENT] duration: 371 seconds
 [CLIENT] transfer succeeded
 ```
 
 ### 数据分析
 
-| 指标 | 数值 |
-|---|---|
-| 有效吞吐量 | ~838 MB / 219s ≈ **3.8 MB/s** |
-| 重传率 | 1,664 / 820,866 ≈ **0.2%** |
-| ACK 包数 / 数据包数 | 159,845 / 819,200 ≈ 每 5 包一 ACK，与 `ACK_EVERY_N=5` 一致 |
-| 文件完整性 | MD5 校验通过，无损坏 |
+指标,计算过程,数值,评价
+有效吞吐量,1024 MB÷357 s,~2.87 MB/s,较前次略有下降，受重传影响明显
+重传率,"83,088÷1,131,666",~7.34%,显著上升，网络环境存在明显丢包或拥塞
+ACK 比例,"289,198:1,131,666",约 1 : 3.9,接近每 4 包一回执，符合高效确认机制
+文件完整性,"基于 1,073,741,824 字节",100% 完整,传输虽然波动，但重传机制确保了数据可靠性
 
 ---
 
@@ -261,8 +260,8 @@ sudo tc qdisc del dev ens5 root
 | `DEFAULT_SERVER_PORT` | `5000` | 服务端监听端口 |
 | `DEFAULT_CLIENT_PORT` | `5001` | 客户端源端口 |
 | `CHUNK_SIZE` | `1024` 字节 | 每个 DATA 包的数据大小 |
-| `TIMEOUT_SEC` | `0.5` 秒 | 重传超时时间 |
-| `SLIDING_WINDOW_SIZE` | `64` | Go-Back-N 窗口大小 |
+| `TIMEOUT_SEC` | `0.03` 秒 | 重传超时时间 |
+| `SLIDING_WINDOW_SIZE` | `16` | Go-Back-N 窗口大小 |
 | `ACK_EVERY_N` | `5` | 每收到 N 包发一次 ACK |
 | `ACK_INTERVAL_SEC` | `0.02` 秒 | ACK 最大发送间隔 |
 | `FILES_DIR` | `files/` | 服务端文件目录 |
