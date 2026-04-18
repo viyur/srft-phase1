@@ -106,7 +106,7 @@ IP 头部和 UDP 头部也分别计算了各自的标准 checksum，符合 RFC 7
 
 服务端使用 Go-Back-N 窗口管理发送缓冲区：
 
-- 每次发送 `base`（最旧未确认包）时，启动一个计时器，超时时间为 `TIMEOUT_SEC`（默认 0.5 秒）
+- 每次发送 `base`（最旧未确认包）时，启动一个计时器，超时时间为 `TIMEOUT_SEC`（默认 0.03 秒）
 - 若在超时前收到 ACK，则滑动窗口，为新的 `base` 重启计时器
 - 若超时仍未收到 ACK，则**重传 `[base, next_seq)` 范围内所有未确认包**，并重启计时器
 
@@ -136,12 +136,12 @@ sudo python3.11 UDPServer.py
 
 **客户端：**
 ```bash
-sudo python3.11 UDPClient.py --server-ip <EC2_SERVER_IP> --filename test_800mb_file
+sudo python3.11 UDPClient.py --server-ip <EC2_SERVER_IP> --filename test_1gb_file
 
 ```
 
 > 使用默认参数时，服务端监听 `0.0.0.0:5000`，文件目录为 `files/`。  
-> 如需测试较小的文件，可将 `--filename test_800mb_file` 换成 `--filename test_10mb_file`，传输速度更快，便于调试。
+> 如需测试较小的文件，可将 `--filename test_1gb_file` 换成 `--filename test_10mb_file`，传输速度更快，便于调试。
 
 ---
 
@@ -154,8 +154,8 @@ sudo python3.11 UDPServer.py \
   --port 5000             # 监听端口，默认 5000
   --dir files             # 提供文件的目录，默认 files/
   --chunk 1024            # 每个 DATA 包的 payload 大小（字节），默认 1024
-  --timeout 0.5           # 重传超时时间（秒），默认 0.5
-  --window 64             # Go-Back-N 窗口大小，默认 64
+  --timeout 0.03           # 重传超时时间（秒），默认 0.03
+  --window 16             # Go-Back-N 窗口大小，默认 16
   --mock                  # 本地测试模式，不使用 raw socket（无需 sudo）
 ```
 
@@ -165,7 +165,7 @@ sudo python3.11 UDPClient.py \
   --server-ip <SERVER_IP>   # 服务端 IP 地址（必填）
   --server-port 5000        # 服务端端口，默认 5000
   --client-port 5001        # 客户端源端口，默认 5001
-  --filename test_800mb_file  # 要请求的文件名（必填）
+  --filename test_1gb_file  # 要请求的文件名（必填）
   --out-dir received        # 接收文件保存目录，默认 received/
 ```
 
