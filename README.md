@@ -122,25 +122,34 @@ checksum_data = SRFT Header（不含 checksum 字段）+ payload
 
 ---
 
-## 3. Quick Start（快速开始）
+## 3. Running on EC2（运行说明）
 
-### 3.1 Default Parameters（使用默认参数）
+由于程序使用 `SOCK_RAW` 和 `IP_HDRINCL`，**只能在 Linux 环境（AWS EC2）下运行**，macOS 不支持。
 
-**服务端：**
+### 3.1 Prerequisites（前提条件）
+- 两台 EC2 Linux 实例，项目文件均位于 `~/srft-phase1/`
+- 安全组开放两台机器之间 UDP 5000、5001 端口
+- 已安装 Python 3.11
+
+### 3.2 Quick Start（快速开始）
+
+**Terminal 1 — 登录服务端：**
 ```bash
-sudo python3.11 UDPServer.py
+ssh -i srft-keypair.pem ec2-user@<SERVER_EC2_IP>
+cd ~/srft-phase1
+sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 4
 ```
 
-**客户端：**
+**Terminal 2 — 登录客户端：**
 ```bash
-sudo python3.11 UDPClient.py --server-ip <EC2_SERVER_IP> --filename test_1gb_file
+ssh -i srft-keypair.pem ec2-user@<CLIENT_EC2_IP>
+cd ~/srft-phase1
+sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename test_1gb_file
 ```
 
-> 使用默认参数时，服务端监听 `0.0.0.0:5000`，文件目录为 `files/`。
+> 使用默认参数时，服务端监听 `0.0.0.0:5000`，文件目录为 `files/`。`--loss` 参数会在启动时自动配置 `tc netem` 丢包规则，支持 `0`、`2`、`3`、`4` 四种丢包率。
 
----
-
-### 3.2 Full Parameter Reference（完整参数说明）
+### 3.3 Full Parameter Reference（完整参数说明）
 
 **服务端所有可用参数：**
 ```bash
@@ -169,32 +178,7 @@ sudo python3.11 UDPClient.py \
 
 ---
 
-## 4. Running on EC2（双机模式）
-
-### 4.1 Prerequisites（前提条件）
-- 两台 EC2 Linux 实例，项目文件均位于 `~/srft-phase1/`
-- 安全组开放两台机器之间 UDP 5000、5001 端口
-- 已安装 Python 3.11
-
-### 4.2 Steps（操作步骤）
-
-**Terminal 1 — 登录服务端，启动服务：**
-```bash
-ssh -i srft-keypair.pem ec2-user@<SERVER_EC2_IP>
-cd ~/srft-phase1
-sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 4
-```
-
-**Terminal 2 — 登录客户端，发起请求：**
-```bash
-ssh -i srft-keypair.pem ec2-user@<CLIENT_EC2_IP>
-cd ~/srft-phase1
-sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename test_1gb_file
-```
-
----
-
-## 5. Packet Loss Configuration（丢包模拟配置）
+## 4. Packet Loss Configuration（丢包模拟配置）
 
 Server 通过 `--loss` 参数在启动时自动配置 `tc netem` 丢包规则，**无需手动执行 `tc` 命令**：
 
@@ -217,11 +201,11 @@ sudo tc qdisc del dev ens5 root
 
 ---
 
-## 6. Test Results & Performance Analysis（EC2 实测结果与性能分析）
+## 5. Test Results & Performance Analysis（EC2 实测结果与性能分析）
 
 所有测试均在两台 AWS EC2 Linux 实例之间进行（同区域，RTT ≈ 1ms），参数固定为 `--timeout 0.005 --window 16`，完整性通过 MD5 验证。
 
-### 6.1 Performance Summary Table（性能汇总表）
+### 5.1 Performance Summary Table（性能汇总表）
 
 > Phase 2 Secure Transfer 列待 Phase 2 完成后填入。
 
@@ -237,7 +221,7 @@ sudo tc qdisc del dev ens5 root
 
 ---
 
-### 6.2 Detailed Test Results（分文件详细结果）
+### 5.2 Detailed Test Results（分文件详细结果）
 
 #### Loss 0%
 
@@ -281,9 +265,9 @@ sudo tc qdisc del dev ens5 root
 
 ---
 
-### 6.3 Performance Analysis（性能分析）
+### 5.3 Performance Analysis（性能分析）
 
-#### 6.3.1 Throughput（吞吐量）
+#### 5.3.1 Throughput（吞吐量）
 
 以 1GB 文件为例（服务端计时）：
 
@@ -296,7 +280,7 @@ sudo tc qdisc del dev ens5 root
 
 0% 丢包时吞吐量最高，随丢包率上升，重传开销增加，吞吐量下降，但仍保持在 2 MB/s 以上。
 
-#### 6.3.2 Retransmission Rate（重传率）
+#### 5.3.2 Retransmission Rate（重传率）
 
 以 1GB 文件为例：
 
@@ -309,7 +293,7 @@ sudo tc qdisc del dev ens5 root
 
 0% 丢包时的少量重传（0.86%）来自 EC2 网络本身的极小波动，并非 tc 配置的丢包。Go-Back-N 的特性使得重传率远高于实际丢包率，因为一个包丢失会导致整个窗口重传。
 
-#### 6.3.3 ACK_EVERY_N Behavior（ACK 频率验证）
+#### 5.3.3 ACK_EVERY_N Behavior（ACK 频率验证）
 
 `ACK_EVERY_N = 5` 的效果可通过 0% 丢包时的 ACK 比例精确验证：
 
@@ -325,7 +309,7 @@ sudo tc qdisc del dev ens5 root
 
 ---
 
-## 7. Configuration Parameters（配置参数）
+## 6. Configuration Parameters（配置参数）
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -341,7 +325,7 @@ sudo tc qdisc del dev ens5 root
 
 ---
 
-## 8. Lessons Learned from AI
+## 7. Lessons Learned from AI
 
 ### Lesson 1 — Sliding Window / Go-Back-N
 
@@ -371,7 +355,7 @@ The correct fix was to reduce `TIMEOUT_SEC` directly. Since EC2 intra-region RTT
 
 ---
 
-## 9. References（参考资料）
+## 8. References（参考资料）
 
 - [RFC 791 — Internet Protocol (IP)](https://www.rfc-editor.org/rfc/rfc791)
 - [RFC 768 — User Datagram Protocol (UDP)](https://www.rfc-editor.org/rfc/rfc768)
