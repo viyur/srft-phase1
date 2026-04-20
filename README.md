@@ -180,7 +180,26 @@ sudo python3.11 UDPClient.py \
 
 ## 4. Packet Loss Configuration（丢包模拟配置）
 
-Server 通过 `--loss` 参数在启动时自动配置 `tc netem` 丢包规则，**无需手动执行 `tc` 命令**：
+Server 通过 `--loss` 参数在启动时自动配置 `tc netem` 丢包规则，**无需手动执行 `tc` 命令**。以下为四种丢包率对应的完整启动命令：
+
+```bash
+# 0% 无丢包（清除已有 tc 规则）
+sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 0
+
+# 2% 丢包
+sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 2
+
+# 3% 丢包
+sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 3
+
+# 4% 丢包
+sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 4
+```
+
+客户端命令（不变）：
+```bash
+sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename <filename>
+```
 
 | 参数 | 丢包率 | 实际执行的 tc 规则 |
 |---|---|---|
@@ -194,16 +213,25 @@ Server 通过 `--loss` 参数在启动时自动配置 `tc netem` 丢包规则，
 ```bash
 # 查看当前 tc 规则（手动确认用）
 tc qdisc show dev ens5
-
-# 手动清除（通常不需要，--loss 0 会自动处理）
-sudo tc qdisc del dev ens5 root
 ```
 
 ---
 
 ## 5. Test Results & Performance Analysis（EC2 实测结果与性能分析）
 
-所有测试均在两台 AWS EC2 Linux 实例之间进行（同区域，RTT ≈ 1ms），参数固定为 `--timeout 0.005 --window 16`，完整性通过 MD5 验证。
+所有测试均在两台 AWS EC2 Linux 实例之间进行（同区域，RTT ≈ 1ms），完整性通过 MD5 验证。
+
+**测试命令（Server 端）：**
+```bash
+sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss <0|2|3|4>
+```
+
+**测试命令（Client 端）：**
+```bash
+sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename <filename>
+```
+
+> 例：`sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename test_1gb_file`
 
 ### 5.1 Performance Summary Table（性能汇总表）
 
@@ -218,6 +246,7 @@ sudo tc qdisc del dev ens5 root
 | test_1gb_file | 1 GB | 202s | 341s | 412s | 484s | — |
 
 *所有传输均 MD5 校验通过，文件完整性 100%。*
+*\* test_500mb_file 在 loss 0% 的测试中服务端 report 未完整截取，仅有客户端计时（94s）。*
 
 ---
 
@@ -229,7 +258,7 @@ sudo tc qdisc del dev ens5 root
 |---|---|---|---|---|---|
 | test_10mb_file | 10,242 | 0 | 2,049 | 00:00:01 | 1s |
 | test_100mb_file | 102,402 | 0 | 20,481 | 00:00:17 | 18s |
-| test_500mb_file | — | — | — | — | 94s |
+| test_500mb_file | — | — | — | — | 94s* |
 | test_800mb_file | 825,986 | 6,784 | 169,997 | 00:02:52 | 183s |
 | test_1gb_file | 1,057,650 | 9,072 | 215,359 | 00:03:07 | 202s |
 
