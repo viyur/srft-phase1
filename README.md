@@ -385,7 +385,40 @@ The correct fix was to reduce `TIMEOUT_SEC` directly. Since EC2 intra-region RTT
 
 ---
 
-## 8. References
+## 8. Manual File Integrity Verification
+
+Although SRFT verifies integrity automatically via MD5 at the end of each transfer, you can also confirm file consistency manually after a transfer completes.
+
+**On the server (original file, located in `files/`):**
+```bash
+md5sum files/<filename>
+sha256sum files/<filename>
+```
+
+**On the client (received file, located in `received/`):**
+```bash
+md5sum received/<filename>
+sha256sum received/<filename>
+```
+
+The hash values must match exactly on both sides. Any difference indicates data corruption during transfer.
+
+**Example:**
+```bash
+# Server
+$ md5sum files/test_1gb_file
+d8e8fca2dc0f896fd7cb4cb0031ba249  files/test_1gb_file
+
+# Client
+$ md5sum received/test_1gb_file
+d8e8fca2dc0f896fd7cb4cb0031ba249  received/test_1gb_file
+```
+
+Both MD5 and SHA-256 are standard Linux utilities available on all EC2 instances — no installation required.
+
+---
+
+## 9. References
 
 - [RFC 791 — Internet Protocol (IP)](https://www.rfc-editor.org/rfc/rfc791)
 - [RFC 768 — User Datagram Protocol (UDP)](https://www.rfc-editor.org/rfc/rfc768)
