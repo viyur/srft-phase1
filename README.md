@@ -246,7 +246,6 @@ sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename <filename>
 | test_1gb_file | 1 GB | 202s | 341s | 412s | 484s | — |
 
 *所有传输均 MD5 校验通过，文件完整性 100%。*
-*\* test_500mb_file 在 loss 0% 的测试中服务端 report 未完整截取，仅有客户端计时（94s）。*
 
 ---
 
@@ -258,7 +257,7 @@ sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename <filename>
 |---|---|---|---|---|---|
 | test_10mb_file | 10,242 | 0 | 2,049 | 00:00:01 | 1s |
 | test_100mb_file | 102,402 | 0 | 20,481 | 00:00:17 | 18s |
-| test_500mb_file | — | — | — | — | 94s* |
+| test_500mb_file | 513,682 | 1,680 | 103,530 | 00:01:30 | 94s |
 | test_800mb_file | 825,986 | 6,784 | 169,997 | 00:02:52 | 183s |
 | test_1gb_file | 1,057,650 | 9,072 | 215,359 | 00:03:07 | 202s |
 
