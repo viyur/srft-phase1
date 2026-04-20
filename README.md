@@ -2,6 +2,8 @@
 
 An application-layer reliable file transfer protocol built on raw UDP sockets, with manually constructed IP and UDP headers, implementing a **Go-Back-N sliding window** mechanism to ensure reliable delivery over unreliable networks.
 
+> **For all test results and performance summary tables, see [Section 5: Test Results & Performance Analysis](#5-test-results--performance-analysis).**
+
 ---
 
 ## 1. Protocol Design
