@@ -1,20 +1,20 @@
 # SRFT — Secure Reliable File Transfer Protocol (Phase 1)
 
-基于原始 UDP socket 构建的应用层可靠文件传输协议，手动构造 IP 与 UDP 头部，并实现了 **Go-Back-N 滑动窗口**机制以在不可靠网络上保障可靠传输。
+An application-layer reliable file transfer protocol built on raw UDP sockets, with manually constructed IP and UDP headers, implementing a **Go-Back-N sliding window** mechanism to ensure reliable delivery over unreliable networks.
 
 ---
 
-## 1. Protocol Design（协议设计）
+## 1. Protocol Design
 
-### 1.1 Packet Structure（数据包结构）
+### 1.1 Packet Structure
 
-每个发送的数据包从底层到应用层依次封装如下：
+Each transmitted packet is encapsulated from the network layer up as follows:
 
 ```
 [ IP Header (20 bytes) ] [ UDP Header (8 bytes) ] [ SRFT Header (11 bytes) ] [ Payload ]
 ```
 
-SRFT Header 格式（共 11 字节）：
+SRFT Header format (11 bytes total):
 
 ```
 [ pkt_type (1B) | seq (4B) | ack (4B) | checksum (2B) ]
@@ -22,218 +22,218 @@ SRFT Header 格式（共 11 字节）：
 
 ---
 
-### 1.2 Five Packet Types（五种包类型）
+### 1.2 Five Packet Types
 
-| 类型 | 值 | 方向 | 说明 |
+| Type | Value | Direction | Description |
 |---|---|---|---|
-| `TYPE_REQUEST` | `0x01` | Client → Server | 客户端请求文件，payload 为文件名 |
-| `TYPE_SYN_ACK` | `0x04` | Server → Client | 服务端确认请求，payload 包含文件总大小（4字节） |
-| `TYPE_DATA` | `0x02` | Server → Client | 服务端发送文件块，payload 为数据内容 |
-| `TYPE_ACK` | `0x03` | Client → Server | 客户端发送累积确认号 |
-| `TYPE_FIN` | `0x05` | Server → Client | 服务端通知传输完成，payload 为文件 MD5（16字节） |
+| `TYPE_REQUEST` | `0x01` | Client → Server | Client requests a file; payload is the filename |
+| `TYPE_SYN_ACK` | `0x04` | Server → Client | Server confirms the request; payload contains file size (4 bytes) |
+| `TYPE_DATA` | `0x02` | Server → Client | Server sends a file chunk; payload is the data |
+| `TYPE_ACK` | `0x03` | Client → Server | Client sends a cumulative acknowledgement |
+| `TYPE_FIN` | `0x05` | Server → Client | Server signals transfer complete; payload is the file MD5 (16 bytes) |
 
 ---
 
-### 1.3 Transfer Flow（完整传输流程）
+### 1.3 Transfer Flow
 
 ```
 Client                              Server
   |                                   |
-  |------- TYPE_REQUEST ------------->|  payload = 文件名（如 "test_1gb_file"）
+  |------- TYPE_REQUEST ------------->|  payload = filename (e.g. "test_1gb_file")
   |                                   |
-  |<------ TYPE_SYN_ACK -------------|  payload = 文件总大小（4字节，网络字节序）
-  |                                   |  seq=0, ack=0（控制包，不参与滑动窗口）
+  |<------ TYPE_SYN_ACK -------------|  payload = file size (4 bytes, network byte order)
+  |                                   |  seq=0, ack=0 (control packet, not in sliding window)
   |                                   |
   |<------ TYPE_DATA (seq=0) ---------|
   |<------ TYPE_DATA (seq=1) ---------|
-  |<------ TYPE_DATA (seq=2) ---------|  ← Go-Back-N 窗口内连续发送
+  |<------ TYPE_DATA (seq=2) ---------|  ← continuous send within Go-Back-N window
   |<------ TYPE_DATA (seq=3) ---------|
   |<------ TYPE_DATA (seq=4) ---------|
-  |------- TYPE_ACK (ack=5) --------->|  ← client 每收到 5 包发一次累积 ACK
+  |------- TYPE_ACK (ack=5) --------->|  ← client sends cumulative ACK every 5 packets
   |          ...                      |
-  |<------ TYPE_FIN ------------------|  payload = MD5 digest（16字节）
-  |------- TYPE_ACK ----------------->|  最终确认
+  |<------ TYPE_FIN ------------------|  payload = MD5 digest (16 bytes)
+  |------- TYPE_ACK ----------------->|  final acknowledgement
 ```
 
 ---
 
-### 1.4 Key Mechanisms（关键机制说明）
+### 1.4 Key Mechanisms
 
-#### 1.4.1 Checksum（数据完整性）
+#### 1.4.1 Checksum
 
-每个 SRFT 包发送前，对以下内容计算 16 位校验和：
+Before sending each SRFT packet, a 16-bit checksum is computed over:
 
 ```
-checksum_data = SRFT Header（不含 checksum 字段）+ payload
+checksum_data = SRFT Header (excluding checksum field) + payload
 ```
 
-计算方法为**反码求和（one's complement sum）**：将数据按 2 字节分组求和，高位进位回加，最后取反。接收方用同样方法重新计算并与包中存储的值比对，不一致则直接丢弃该包。IP 头部和 UDP 头部也分别计算了各自的标准 checksum，符合 RFC 791 和 RFC 768 规范。
+The method is **one's complement sum**: data is split into 2-byte groups, summed with carry wraparound, and the result is bitwise inverted. The receiver recomputes the checksum and discards any packet where the values do not match. IP and UDP headers also carry their respective standard checksums per RFC 791 and RFC 768.
 
 ---
 
-#### 1.4.2 Sequence Numbers（序列号 — 检测重复与乱序）
+#### 1.4.2 Sequence Numbers
 
-服务端发送的每个 `TYPE_DATA` 包都携带一个从 **0** 开始的递增序列号（`seq=0, 1, 2, ...`），每个序列号对应文件的一个固定大小块（默认 1024 字节）。
+Each `TYPE_DATA` packet carries a monotonically increasing sequence number starting at **0** (`seq=0, 1, 2, ...`), where each number corresponds to a fixed-size chunk of the file (default 1024 bytes).
 
-客户端维护一个 `expected_seq`，初始值为 **0**：
-- 收到的包 `seq == expected_seq`：写入文件，`expected_seq += 1`，正常处理
-- 收到的包 `seq != expected_seq`（重复包或乱序包）：**直接丢弃**，并立即重新发送当前的累积 ACK
+The client maintains `expected_seq`, initialised to **0**:
+- `seq == expected_seq`: write payload to file, increment `expected_seq`, process normally
+- `seq != expected_seq` (duplicate or out-of-order): **discard immediately** and resend the current cumulative ACK
 
-这是 **Go-Back-N** 的标准接收端行为——客户端通过丢弃乱序或重复包，让服务端无法收到 ACK，一旦超时就退回重传整个窗口，确保包的顺序不会混乱。
+This is standard Go-Back-N receiver behaviour. By discarding out-of-order packets, the client withholds the ACK the server needs; the server's timer then fires and the entire window is retransmitted in order.
 
-> `ACK` 字段表示 next expected seq：若 `UDPClient` 发的 `ACK=16`，则说明已收到序号 0–15 的所有数据包。
+> The `ack` field means *next expected sequence number*. An `ACK=16` from the client means all packets with seq 0–15 have been received correctly.
 
 ---
 
-#### 1.4.3 Cumulative ACK（累积确认号 — 避免逐包 ACK）
+#### 1.4.3 Cumulative ACK
 
-客户端发送的 `TYPE_ACK` 包中，`ack` 字段的值表示**下一个期望收到的序列号**。为了避免每收到一个包就发一次 ACK，客户端采用**延迟 ACK 策略**，满足以下任一条件时才发送 ACK：
+The `ack` field in each `TYPE_ACK` packet is the next sequence number the client expects. To avoid sending one ACK per packet, the client uses a **delayed ACK strategy** and only sends an ACK when any of the following conditions is met:
 
-| 触发条件 | 配置参数 | 默认值 |
+| Trigger | Parameter | Default |
 |---|---|---|
-| 累计收到 N 个包 | `ACK_EVERY_N` | 5 |
-| 距离上次 ACK 超过一定时间 | `ACK_INTERVAL_SEC` | 0.02 秒 |
-| 已收到最后一个数据包 | — | 自动触发 |
-| 收到乱序/重复包 | — | 立即触发（负反馈） |
+| N packets received since last ACK | `ACK_EVERY_N` | 5 |
+| Time since last ACK exceeds threshold | `ACK_INTERVAL_SEC` | 0.02 s |
+| Last data packet received | — | automatic |
+| Out-of-order or duplicate packet received | — | immediate (negative feedback) |
 
 ---
 
-#### 1.4.4 Retransmission due to Timeout（超时重传）
+#### 1.4.4 Retransmission due to Timeout
 
-服务端使用 Go-Back-N 窗口管理发送缓冲区：
+The server manages the send buffer using a Go-Back-N window:
 
-- 每次发送 `base`（最旧未确认包）时，启动一个计时器，超时时间为 `TIMEOUT_SEC`（默认 0.005 秒）
-- 若在超时前收到 ACK，则滑动窗口，为新的 `base` 重启计时器
-- 若超时仍未收到 ACK，则**重传 `[base, next_seq)` 范围内所有未确认包**，并重启计时器
+- When `base` (the oldest unacknowledged packet) is sent, a timer is started with duration `TIMEOUT_SEC` (default 0.005 s)
+- If an ACK is received before timeout, the window slides forward and the timer is restarted for the new `base`
+- If no ACK arrives before timeout, **all packets in `[base, next_seq)` are retransmitted** and the timer is restarted
 
-> **为什么 timeout 设为 0.005 秒（5ms）？**
-> 在 4% 丢包条件下的实测中，使用 `timeout=0.03s` 和 `window=16` 传输 1GB 文件耗时长达 26 分钟。分析发现约 43,700 次超时事件 × 30ms = 1,311 秒（占总时长 83%）纯粹是在等待超时，真正传输数据的时间不足 20%。EC2 同区域 RTT ≈ 1ms，将 timeout 缩短至 5ms（RTT 的 5 倍）可在保证 ACK 可靠到达的前提下，将超时等待总时长从 1,311 秒降至约 219 秒，大幅提升传输效率。
-
----
-
-## 2. Platform Requirements（平台限制）
-
-> **macOS 对原始 socket 有严格限制，`IP_HDRINCL` 无法正常工作。**
-
-**必须在以下环境测试：**
-- ✅ **Linux EC2 实例**（推荐，见下方测试结果）
-- ✅ **Linux 虚拟机**（VirtualBox、VMware、UTM 等）
-- ❌ macOS — 不支持 raw socket 模式
+> **Why 0.005 s (5 ms)?**
+> Under 4% packet loss with `timeout=0.03s` and `window=16`, a 1 GB transfer took 26 minutes. Analysis showed approximately 43,700 timeout events × 30 ms = 1,311 s — **83% of total transfer time was pure timeout stall**, with less than 20% spent actually transmitting data. EC2 intra-region RTT ≈ 1 ms; setting timeout to 5 ms (5× RTT) is sufficient for ACKs to arrive reliably, cutting total timeout stall from ~1,311 s to ~219 s and reducing transfer time to approximately 6–7 minutes.
 
 ---
 
-## 3. Running on EC2（运行说明）
+## 2. Platform Requirements
 
-由于程序使用 `SOCK_RAW` 和 `IP_HDRINCL`，**只能在 Linux 环境（AWS EC2）下运行**，macOS 不支持。
+> **macOS restricts raw sockets strictly — `IP_HDRINCL` does not work correctly on macOS.**
 
-### 3.1 Prerequisites（前提条件）
-- 两台 EC2 Linux 实例，项目文件均位于 `~/srft-phase1/`
-- 安全组开放两台机器之间 UDP 5000、5001 端口
-- 已安装 Python 3.11
+**Must run on:**
+- ✅ **Linux EC2 instance** (recommended — see test results below)
+- ✅ **Linux VM** (VirtualBox, VMware, UTM, etc.)
+- ❌ macOS — raw socket mode not supported
 
-### 3.2 Quick Start（快速开始）
+---
 
-**Terminal 1 — 登录服务端：**
+## 3. Running on EC2
+
+Because the program uses `SOCK_RAW` and `IP_HDRINCL`, it **can only run on Linux (AWS EC2)**. macOS is not supported.
+
+### 3.1 Prerequisites
+- Two EC2 Linux instances with the project files at `~/srft-phase1/`
+- Security group allows UDP traffic on ports 5000 and 5001 between the two instances
+- Python 3.11 installed
+
+### 3.2 Quick Start
+
+**Terminal 1 — SSH into the server instance:**
 ```bash
 ssh -i srft-keypair.pem ec2-user@<SERVER_EC2_IP>
 cd ~/srft-phase1
 sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 4
 ```
 
-**Terminal 2 — 登录客户端：**
+**Terminal 2 — SSH into the client instance:**
 ```bash
 ssh -i srft-keypair.pem ec2-user@<CLIENT_EC2_IP>
 cd ~/srft-phase1
 sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename test_1gb_file
 ```
 
-> 使用默认参数时，服务端监听 `0.0.0.0:5000`，文件目录为 `files/`。`--loss` 参数会在启动时自动配置 `tc netem` 丢包规则，支持 `0`、`2`、`3`、`4` 四种丢包率。
+> By default, the server listens on `0.0.0.0:5000` and serves files from the `files/` directory. The `--loss` flag automatically configures `tc netem` on startup; supported values are `0`, `2`, `3`, and `4`.
 
-### 3.3 Full Parameter Reference（完整参数说明）
+### 3.3 Full Parameter Reference
 
-**服务端所有可用参数：**
+**Server parameters:**
 ```bash
 sudo python3.11 UDPServer.py \
-  --bind-ip <SERVER_IP>   # 服务端绑定 IP，默认 0.0.0.0（自动检测）
-  --port 5000             # 监听端口，默认 5000
-  --dir files             # 提供文件的目录，默认 files/
-  --chunk 1024            # 每个 DATA 包的 payload 大小（字节），默认 1024
-  --timeout 0.005         # 重传超时时间（秒），默认 0.005
-  --window 16             # Go-Back-N 窗口大小，默认 16
-  --loss 4                # 丢包率（%），自动配置 tc netem，支持 0/2/3/4，默认 0
-  --mock                  # 本地测试模式，不使用 raw socket（无需 sudo）
+  --bind-ip <SERVER_IP>   # IP to bind (default: 0.0.0.0, auto-detected)
+  --port 5000             # listening port (default: 5000)
+  --dir files             # directory of files to serve (default: files/)
+  --chunk 1024            # DATA packet payload size in bytes (default: 1024)
+  --timeout 0.005         # retransmission timeout in seconds (default: 0.005)
+  --window 16             # Go-Back-N window size (default: 16)
+  --loss 4                # packet loss % to apply via tc netem; 0/2/3/4 (default: 0)
+  --mock                  # local test mode using plain UDP, no sudo required
 ```
 
-**客户端所有可用参数：**
+**Client parameters:**
 ```bash
 sudo python3.11 UDPClient.py \
-  --server-ip <SERVER_IP>   # 服务端 IP 地址（必填）
-  --server-port 5000        # 服务端端口，默认 5000
-  --client-port 5001        # 客户端源端口，默认 5001
-  --filename test_1gb_file  # 要请求的文件名（必填）
-  --out-dir received        # 接收文件保存目录，默认 received/
+  --server-ip <SERVER_IP>   # server IP address (required)
+  --server-port 5000        # server port (default: 5000)
+  --client-port 5001        # client source port (default: 5001)
+  --filename test_1gb_file  # filename to request from server (required)
+  --out-dir received        # local directory to save the received file (default: received/)
 ```
 
-> **注意：raw socket 模式下必须使用 `sudo python3.11` 运行，否则会因权限不足而报错。**
+> **Note: raw socket mode requires `sudo python3.11`. Running without sudo will fail due to insufficient permissions.**
 
 ---
 
-## 4. Packet Loss Configuration（丢包模拟配置）
+## 4. Packet Loss Configuration
 
-Server 通过 `--loss` 参数在启动时自动配置 `tc netem` 丢包规则，**无需手动执行 `tc` 命令**。以下为四种丢包率对应的完整启动命令：
+The server automatically configures `tc netem` packet loss rules on startup via the `--loss` flag — **no manual `tc` commands needed**. Complete commands for each loss rate:
 
 ```bash
-# 0% 无丢包（清除已有 tc 规则）
+# 0% — no packet loss (clears any existing tc rule)
 sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 0
 
-# 2% 丢包
+# 2% packet loss
 sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 2
 
-# 3% 丢包
+# 3% packet loss
 sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 3
 
-# 4% 丢包
+# 4% packet loss
 sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss 4
 ```
 
-客户端命令（不变）：
+Client command (unchanged across all loss rates):
 ```bash
 sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename <filename>
 ```
 
-| 参数 | 丢包率 | 实际执行的 tc 规则 |
+| Flag | Loss Rate | tc rule applied |
 |---|---|---|
-| `--loss 0` | 0%（无丢包） | 清除已有 tc 规则 |
+| `--loss 0` | 0% (no loss) | existing rule cleared |
 | `--loss 2` | 2% | `tc qdisc add dev ens5 root netem loss 2%` |
 | `--loss 3` | 3% | `tc qdisc add dev ens5 root netem loss 3%` |
 | `--loss 4` | 4% | `tc qdisc add dev ens5 root netem loss 4%` |
 
-启动时如果 `ens5` 上已有旧的 tc 规则，会自动先删除再添加新规则。丢包率会记录在 server report 中，便于对比不同丢包条件下的传输结果。
+Any existing tc rule on `ens5` is automatically deleted before the new rule is applied. The loss rate is recorded in the server report for easy comparison across test runs.
 
 ```bash
-# 查看当前 tc 规则（手动确认用）
+# Verify current tc rule manually
 tc qdisc show dev ens5
 ```
 
 ---
 
-## 5. Test Results & Performance Analysis（EC2 实测结果与性能分析）
+## 5. Test Results & Performance Analysis
 
-所有测试均在两台 AWS EC2 Linux 实例之间进行（同区域，RTT ≈ 1ms），完整性通过 MD5 验证。
+All tests run between two AWS EC2 Linux instances in the same region (RTT ≈ 1 ms). Integrity verified via MD5 checksum on every transfer.
 
-**测试命令（Server 端）：**
+**Server command:**
 ```bash
 sudo python3.11 UDPServer.py --timeout 0.005 --window 16 --loss <0|2|3|4>
 ```
 
-**测试命令（Client 端）：**
+**Client command:**
 ```bash
 sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename <filename>
 ```
 
-> 例：`sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename test_1gb_file`
+> Example: `sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename test_1gb_file`
 
-### 5.1 Performance Summary Table（性能汇总表）
+### 5.1 Performance Summary Table
 
 | File | Size | Loss 0% | Loss 2% | Loss 3% | Loss 4% |
 |---|---|---|---|---|---|
@@ -243,13 +243,13 @@ sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename <filename>
 | test_800mb_file | 800 MB | 183s | 295s | 352s | 407s |
 | test_1gb_file | 1 GB | 202s | 341s | 412s | 484s |
 
-*所有传输均 MD5 校验通过，文件完整性 100%。*
+*All transfers passed MD5 verification — file integrity 100%.*
 
-> Phase 2 的安全传输测试结果（PSK + AEAD，0% 丢包）请参考 Phase 2 目录中的 README。
+> For Phase 2 secure transfer test results (PSK + AEAD, 0% packet loss), refer to the Phase 2 README.
 
 ---
 
-### 5.2 Detailed Test Results（分文件详细结果）
+### 5.2 Detailed Test Results
 
 #### Loss 0%
 
@@ -293,63 +293,63 @@ sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename <filename>
 
 ---
 
-### 5.3 Performance Analysis（性能分析）
+### 5.3 Performance Analysis
 
-#### 5.3.1 Throughput（吞吐量）
+#### 5.3.1 Throughput
 
-以 1GB 文件为例（服务端计时）：
+Using the 1 GB file as a reference (server-side timing):
 
-| 丢包率 | 传输时长 | 有效吞吐量 |
+| Loss Rate | Transfer Duration | Effective Throughput |
 |---|---|---|
 | 0% | 187s | ~5.47 MB/s |
 | 2% | 327s | ~3.13 MB/s |
 | 3% | 397s | ~2.58 MB/s |
 | 4% | 471s | ~2.17 MB/s |
 
-0% 丢包时吞吐量最高，随丢包率上升，重传开销增加，吞吐量下降，但仍保持在 2 MB/s 以上。
+Throughput is highest with no packet loss and degrades as loss increases due to retransmission overhead. Even at 4% loss, throughput remains above 2 MB/s.
 
-#### 5.3.2 Retransmission Rate（重传率）
+#### 5.3.2 Retransmission Rate
 
-以 1GB 文件为例：
+Using the 1 GB file as a reference:
 
-| 丢包率 | 重传包数 | 重传率 |
+| Loss Rate | Retransmitted Packets | Retransmission Rate |
 |---|---|---|
 | 0% | 9,072 | 0.86% |
 | 2% | 349,648 | 25.0% |
 | 3% | 528,272 | 33.5% |
 | 4% | 713,177 | 40.5% |
 
-0% 丢包时的少量重传（0.86%）来自 EC2 网络本身的极小波动，并非 tc 配置的丢包。Go-Back-N 的特性使得重传率远高于实际丢包率，因为一个包丢失会导致整个窗口重传。
+The small number of retransmissions at 0% loss (0.86%) reflects minor network jitter in the EC2 environment, not tc-configured loss. Go-Back-N's window retransmission behaviour causes the retransmission rate to far exceed the actual loss rate — a single lost packet triggers retransmission of the entire window.
 
-#### 5.3.3 ACK_EVERY_N Behavior（ACK 频率验证）
+#### 5.3.3 ACK_EVERY_N Behaviour
 
-`ACK_EVERY_N = 5` 的效果可通过 0% 丢包时的 ACK 比例精确验证：
+The effect of `ACK_EVERY_N = 5` is precisely verified by the ACK ratio at 0% packet loss:
 
-| 文件 | 原始数据包数 | ACKs 收到 | 比值（包/ACK） |
+| File | Original Packets | ACKs Received | Ratio (pkts/ACK) |
 |---|---|---|---|
 | test_10mb_file | 10,240 | 2,049 | **5.00** |
 | test_100mb_file | 102,400 | 20,481 | **5.00** |
 | test_1gb_file | 1,048,576 | 215,359 | **4.87 ≈ 5** |
 
-0% 丢包时每 5 个数据包恰好对应 1 个 ACK，完美印证了 `ACK_EVERY_N=5` 的计数触发机制。
+At 0% loss, exactly 5 data packets correspond to 1 ACK, perfectly confirming the count-based trigger of `ACK_EVERY_N=5`.
 
-在有丢包的情况下，ACK 比值显著下降（例如 2% 丢包、1GB 时降至约 2.0），原因是乱序包触发了大量立即 ACK（负反馈），以及重传包也会引发额外的 ACK 响应。这说明延迟 ACK 的三个触发条件（计数、时间间隔、乱序立即触发）协同工作，在有丢包时自动提高反馈频率，加速重传响应。
+Under packet loss, the ratio drops significantly (e.g. to ~2.0 at 2% loss with the 1 GB file) because out-of-order packets trigger immediate ACKs (negative feedback), and retransmitted packets also generate additional ACK responses. This demonstrates the three delayed-ACK triggers — count, interval timer, and immediate-on-out-of-order — working together to automatically increase feedback frequency under loss and accelerate retransmission.
 
 ---
 
-## 6. Configuration Parameters（配置参数）
+## 6. Configuration Parameters
 
-| 参数 | 默认值 | 说明 |
+| Parameter | Default | Description |
 |---|---|---|
-| `DEFAULT_SERVER_PORT` | `5000` | 服务端监听端口 |
-| `DEFAULT_CLIENT_PORT` | `5001` | 客户端源端口 |
-| `CHUNK_SIZE` | `1024` 字节 | 每个 DATA 包的数据大小 |
-| `TIMEOUT_SEC` | `0.005` 秒 | 重传超时时间 |
-| `SLIDING_WINDOW_SIZE` | `16` | Go-Back-N 窗口大小 |
-| `ACK_EVERY_N` | `5` | 每收到 N 包发一次 ACK |
-| `ACK_INTERVAL_SEC` | `0.02` 秒 | ACK 最大发送间隔 |
-| `FILES_DIR` | `files/` | 服务端文件目录 |
-| `REPORT_FILE` | `transfer_report.txt` | 服务端报告保存路径 |
+| `DEFAULT_SERVER_PORT` | `5000` | Server listening port |
+| `DEFAULT_CLIENT_PORT` | `5001` | Client source port |
+| `CHUNK_SIZE` | `1024` bytes | DATA packet payload size |
+| `TIMEOUT_SEC` | `0.005` s | Retransmission timeout |
+| `SLIDING_WINDOW_SIZE` | `16` | Go-Back-N window size |
+| `ACK_EVERY_N` | `5` | Send ACK every N received packets |
+| `ACK_INTERVAL_SEC` | `0.02` s | Maximum interval between ACKs |
+| `FILES_DIR` | `files/` | Server file directory |
+| `REPORT_FILE` | `transfer_report.txt` | Server report output path |
 
 ---
 
@@ -363,7 +363,7 @@ Initially, our implementation sent one packet and waited for the client to ACK i
 
 ### Lesson 2 — Delayed ACK Needs More Than Just a Counter
 
-Our first approach to avoiding per-packet ACKs was a simple counter: send an ACK every N packets (`ACK_EVERY_N = 5`). During testing, we noticed the transfer was unexpectedly slow and occasionally incorrect. While debugging with AI, we identified two missing cases:
+Our first approach to avoiding per-packet ACKs was a simple counter: send an ACK every N packets (`ACK_EVERY_N = 5`). During testing, we noticed the transfer was unexpectedly slow and occasionally incorrect. While debugging with AI, we identified three missing cases:
 
 1. **Time-based trigger**: if packets arrive slowly or the window stalls, the counter may never reach N. A secondary `ACK_INTERVAL_SEC` timer ensures an ACK is sent periodically regardless of packet count.
 2. **Immediate ACK on out-of-order / duplicate packets**: when the client receives a packet with an unexpected sequence number, it must ACK immediately (negative feedback to the server) rather than waiting for the counter or timer.
@@ -383,10 +383,10 @@ The correct fix was to reduce `TIMEOUT_SEC` directly. Since EC2 intra-region RTT
 
 ---
 
-## 8. References（参考资料）
+## 8. References
 
 - [RFC 791 — Internet Protocol (IP)](https://www.rfc-editor.org/rfc/rfc791)
 - [RFC 768 — User Datagram Protocol (UDP)](https://www.rfc-editor.org/rfc/rfc768)
-- [Python `hashlib` 文档](https://docs.python.org/3/library/hashlib.html)
-- [Python `struct` 文档](https://docs.python.org/3/library/struct.html)
-- [Linux `tc` / `netem` 文档](https://man7.org/linux/man-pages/man8/tc-netem.8.html)
+- [Python `hashlib` documentation](https://docs.python.org/3/library/hashlib.html)
+- [Python `struct` documentation](https://docs.python.org/3/library/struct.html)
+- [Linux `tc` / `netem` documentation](https://man7.org/linux/man-pages/man8/tc-netem.8.html)
