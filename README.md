@@ -154,8 +154,9 @@ sudo python3.11 UDPServer.py \
   --port 5000             # 监听端口，默认 5000
   --dir files             # 提供文件的目录，默认 files/
   --chunk 1024            # 每个 DATA 包的 payload 大小（字节），默认 1024
-  --timeout 0.03           # 重传超时时间（秒），默认 0.03
+  --timeout 0.03          # 重传超时时间（秒），默认 0.03
   --window 16             # Go-Back-N 窗口大小，默认 16
+  --loss 4                # 丢包率（%），自动配置 tc netem，支持 0/2/3/4，默认 0
   --mock                  # 本地测试模式，不使用 raw socket（无需 sudo）
 ```
 
@@ -186,8 +187,10 @@ sudo python3.11 UDPClient.py \
 ```bash
 ssh -i srft-keypair.pem ec2-user@<SERVER_EC2_IP>
 cd ~/srft-phase1
-sudo python3.11 UDPServer.py --timeout 0.03 --window 16 （为了配合server丢包，timeout需要减少！！！）
+sudo python3.11 UDPServer.py --timeout 0.03 --window 16 --loss 4
 ```
+
+> `--loss` 参数会在启动时自动配置 `tc netem` 丢包规则，并在 server report 中记录。支持 `0`、`2`、`3`、`4` 四种丢包率。
 
 **Terminal 2 — 登录客户端，发起请求：**
 ```bash
@@ -200,22 +203,26 @@ sudo python3.11 UDPClient.py --server-ip <SERVER_EC2_IP> --filename test_800mb_f
 
 
 
-## EC2 丢包模拟配置（`tc` 命令）
+## EC2 丢包模拟配置（`--loss` 参数）
 
-server 端 EC2 实例上使用 `tc`（Linux Traffic Control）模拟了 **3% 随机丢包**，用于测试协议在不可靠网络下的重传机制：
+server 通过 `--loss` 参数在启动时自动配置 `tc netem` 丢包规则，**无需手动执行 `tc` 命令**。支持以下四种丢包率：
+
+| 命令 | 丢包率 | 实际执行的 tc 规则 |
+|---|---|---|
+| `--loss 0` | 0%（无丢包） | 清除已有 tc 规则 |
+| `--loss 2` | 2% | `tc qdisc add dev ens5 root netem loss 2%` |
+| `--loss 3` | 3% | `tc qdisc add dev ens5 root netem loss 3%` |
+| `--loss 4` | 4% | `tc qdisc add dev ens5 root netem loss 4%` |
+
+启动时如果 `ens5` 上已有旧的 tc 规则，会自动先删除再添加新规则。丢包率会记录在 server report 中，便于对比不同丢包条件下的传输结果。
 
 ```bash
-# 查看当前 tc 规则
+# 查看当前 tc 规则（手动确认用）
 tc qdisc show dev ens5
 
-# 添加 2%到4% 随机丢包（当前配置）
-sudo tc qdisc add dev ens5 root netem loss 2% 4%
-
-# 删除丢包配置（恢复正常网络）
+# 手动清除（通常不需要，--loss 0 会自动处理）
 sudo tc qdisc del dev ens5 root
 ```
-
-删除后可用 `tc qdisc show dev ens5` 确认规则已清空，之后重新运行server side即可在无丢包环境下测试。
 
 ---
 
