@@ -235,17 +235,17 @@ sudo python3.11 UDPClient.py --server-ip 172.31.41.138 --filename <filename>
 
 ### 5.1 Performance Summary Table（性能汇总表）
 
-> Phase 2 Secure Transfer 列待 Phase 2 完成后填入。
-
-| File | Size | Loss 0% | Loss 2% | Loss 3% | Loss 4% | Phase 2 Secure (0% loss) |
-|---|---|---|---|---|---|---|
-| test_10mb_file | 10 MB | 1s | 4s | 3s | 4s | — |
-| test_100mb_file | 100 MB | 17s | 32s | 38s | 44s | — |
-| test_500mb_file | 500 MB | 94s | 164s | 200s | 237s | — |
-| test_800mb_file | 800 MB | 183s | 295s | 352s | 407s | — |
-| test_1gb_file | 1 GB | 202s | 341s | 412s | 484s | — |
+| File | Size | Loss 0% | Loss 2% | Loss 3% | Loss 4% |
+|---|---|---|---|---|---|
+| test_10mb_file | 10 MB | 1s | 4s | 3s | 4s |
+| test_100mb_file | 100 MB | 17s | 32s | 38s | 44s |
+| test_500mb_file | 500 MB | 94s | 164s | 200s | 237s |
+| test_800mb_file | 800 MB | 183s | 295s | 352s | 407s |
+| test_1gb_file | 1 GB | 202s | 341s | 412s | 484s |
 
 *所有传输均 MD5 校验通过，文件完整性 100%。*
+
+> Phase 2 的安全传输测试结果（PSK + AEAD，0% 丢包）请参考 Phase 2 目录中的 README。
 
 ---
 
