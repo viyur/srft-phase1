@@ -227,7 +227,7 @@ def main():
     parser.add_argument("--dir", default=config.FILES_DIR, help="directory with files to serve")
     parser.add_argument("--chunk", type=int, default=config.CHUNK_SIZE, help="DATA payload size (bytes)")
     parser.add_argument("--timeout", type=float, default=config.TIMEOUT_SEC, help="retransmit timeout seconds")
-    parser.add_argument("--window", type=int, default=getattr(config, "WINDOW_SIZE", 64), help="GBN window size")
+    parser.add_argument("--window", type=int, default=getattr(config, "SLIDING_WINDOW_SIZE", 64), help="GBN window size")
     parser.add_argument("--mock", action="store_true", help="use plain UDP sockets for local testing")
     args = parser.parse_args()
 
