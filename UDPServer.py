@@ -25,6 +25,7 @@ import time
 import socket
 import argparse
 import hashlib
+import subprocess
 import config
 import struct
 
@@ -220,6 +221,31 @@ def send_control(
     counters["packets_sent_total"] += 1
 
 
+TC_INTERFACE = "ens5"
+
+def configure_tc_loss(loss_percent: float) -> None:
+    # Remove existing tc rule if any (ignore error when none exists)
+    del_result = subprocess.run(
+        ["tc", "qdisc", "del", "dev", TC_INTERFACE, "root"],
+        stderr=subprocess.DEVNULL
+    )
+    if del_result.returncode == 0:
+        print(f"[TC] removed existing tc rule on {TC_INTERFACE}")
+
+    if loss_percent > 0:
+        loss_str = f"{loss_percent:g}%"
+        result = subprocess.run(
+            ["tc", "qdisc", "add", "dev", TC_INTERFACE, "root", "netem", "loss", loss_str],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print(f"[TC] applied: tc qdisc add dev {TC_INTERFACE} root netem loss {loss_str}")
+        else:
+            print(f"[TC] failed to apply tc rule: {result.stderr.strip()}")
+    else:
+        print(f"[TC] no packet loss configured on {TC_INTERFACE}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bind-ip", default="0.0.0.0", help="server bind ip (0.0.0.0 = auto)")
@@ -229,7 +255,11 @@ def main():
     parser.add_argument("--timeout", type=float, default=config.TIMEOUT_SEC, help="retransmit timeout seconds")
     parser.add_argument("--window", type=int, default=getattr(config, "SLIDING_WINDOW_SIZE", 64), help="GBN window size")
     parser.add_argument("--mock", action="store_true", help="use plain UDP sockets for local testing")
+    parser.add_argument("--loss", type=float, default=0, help="packet loss percentage to apply via tc netem (e.g. 4 for 4%%)")
     args = parser.parse_args()
+
+    if not args.mock:
+        configure_tc_loss(args.loss)
 
     listen_port = args.port
     files_dir = args.dir
@@ -471,6 +501,7 @@ def main():
     print("\n===== SRFT Phase 1 Server Report =====")
     print(f"Name of the transferred file: {filename}")
     print(f"Size of the transferred file: {file_size}")
+    print(f"Packet loss rate (tc netem): {args.loss:g}%")
     print(f"The number of packets sent from the server: {counters['packets_sent_total']}")
     print(f"The number of retransmitted packets from the server: {counters['packets_retransmitted']}")
     print(f"The number of packets received from the client: {counters['packets_received_from_client']}")
@@ -483,6 +514,7 @@ def main():
             with open(report_path, "w") as rf:
                 rf.write(f"Name of the transferred file: {filename}\n")
                 rf.write(f"Size of the transferred file: {file_size}\n")
+                rf.write(f"Packet loss rate (tc netem): {args.loss:g}%\n")
                 rf.write(f"The number of packets sent from the server: {counters['packets_sent_total']}\n")
                 rf.write(f"The number of retransmitted packets from the server: {counters['packets_retransmitted']}\n")
                 rf.write(f"The number of packets received from the client: {counters['packets_received_from_client']}\n")
