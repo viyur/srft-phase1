@@ -279,6 +279,36 @@ ACK 比例,"289,198:1,131,666",约 1 : 3.9,接近每 4 包一回执，符合高�
 
 ---
 
+## Lessons Learned from AI
+
+### Lesson 1 — Sliding Window / Go-Back-N
+
+Initially, our implementation sent one packet and waited for the client to ACK it before sending the next — essentially stop-and-wait. Through discussion with AI, we learned about the **sliding window** concept and adopted the **Go-Back-N** algorithm, which allows the server to keep up to `WINDOW_SIZE` unacknowledged packets in flight simultaneously. This fundamentally improved throughput by decoupling sending from waiting for individual ACKs.
+
+---
+
+### Lesson 2 — Delayed ACK Needs More Than Just a Counter
+
+Our first approach to avoiding per-packet ACKs was a simple counter: send an ACK every N packets (`ACK_EVERY_N = 5`). During testing, we noticed the transfer was unexpectedly slow and occasionally incorrect. While debugging with AI, we identified two missing cases:
+
+1. **Time-based trigger**: if packets arrive slowly or the window stalls, the counter may never reach N. A secondary `ACK_INTERVAL_SEC` timer ensures an ACK is sent periodically regardless of packet count.
+2. **Immediate ACK on out-of-order / duplicate packets**: when the client receives a packet with an unexpected sequence number, it must ACK immediately (negative feedback to the server) rather than waiting for the counter or timer.
+3. **Immediate ACK on FIN**: the final FIN packet must also bypass the counter and trigger an ACK right away to complete the transfer cleanly.
+
+Adding these three cases resolved the slow transfer and correctness issues.
+
+---
+
+### Lesson 3 — Reducing Window Size Does Not Fix Timeout Bottleneck
+
+After observing that a 1 GB file transfer took **26 minutes** under 4% packet loss (with `timeout=0.03s`, `window=16`), our intuition was to reduce the window size to limit retransmissions. We tested `window=8` — retransmissions halved, but the transfer still took **26 minutes**.
+
+AI helped us see why: with ~43,700 timeout events each stalling for 30 ms, roughly **83% of total transfer time was pure timeout waiting**, not data transmission. Changing window size only changes how many packets are retransmitted per timeout event — it does not reduce the number of timeout events themselves.
+
+The correct fix was to reduce `TIMEOUT_SEC` directly. Since EC2 intra-region RTT ≈ 1 ms, a timeout of **0.005 s** (5× RTT) is sufficient for ACKs to arrive reliably while cutting the total timeout stall from ~1,311 s down to ~219 s — reducing the expected transfer time from 26 minutes to approximately 6–7 minutes.
+
+---
+
 ## 参考资料
 
 - [RFC 791 — Internet Protocol (IP)](https://www.rfc-editor.org/rfc/rfc791)
