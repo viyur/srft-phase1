@@ -220,6 +220,13 @@ def receive_file(
         f.truncate(file_size)
 
     local_md5 = compute_md5(output_path)
+    local_md5_hex = local_md5.hex()
+
+    print("\n===== SRFT Phase 1 Client Report =====")
+    print(f"File name: {filename}")
+    print(f"File size: {file_size} bytes")
+    print(f"Number of packets received from server: {expected_seq}")
+    print(f"Received file MD5: {local_md5_hex}")
 
     if local_md5 == server_md5:
         print("[SUCCESS] MD5 verified. Transfer complete.")

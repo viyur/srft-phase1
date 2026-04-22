@@ -354,6 +354,7 @@ def main():
             md5.update(block)
     # returns the final MD5 hash value as raw bytes after all data has been processed with md5.update()
     md5_bytes = md5.digest()
+    md5_hex = md5.hexdigest()
 
     # --- Go-Back-N sending ---
     # base: oldest unacked seq
@@ -501,6 +502,7 @@ def main():
     print("\n===== SRFT Phase 1 Server Report =====")
     print(f"Name of the transferred file: {filename}")
     print(f"Size of the transferred file: {file_size}")
+    print(f"Original file MD5: {md5_hex}")
     print(f"Packet loss rate (tc netem): {args.loss:g}%")
     print(f"The number of packets sent from the server: {counters['packets_sent_total']}")
     print(f"The number of retransmitted packets from the server: {counters['packets_retransmitted']}")
@@ -514,6 +516,7 @@ def main():
             with open(report_path, "w") as rf:
                 rf.write(f"Name of the transferred file: {filename}\n")
                 rf.write(f"Size of the transferred file: {file_size}\n")
+                rf.write(f"Original file MD5: {md5_hex}\n")
                 rf.write(f"Packet loss rate (tc netem): {args.loss:g}%\n")
                 rf.write(f"The number of packets sent from the server: {counters['packets_sent_total']}\n")
                 rf.write(f"The number of retransmitted packets from the server: {counters['packets_retransmitted']}\n")
